@@ -1,3 +1,5 @@
+import type { ModerationDeleteIntentService } from './moderation-delete-intent.service';
+import type { ModerationRuleFollowupService } from './moderation-rule-followup.service';
 import { createHandleLookupMock } from './navigation/max-handle-navigation.fixture';
 import { REQUIRED_SUBSCRIPTION_MAX_CHANNELS, type MaxUpdate } from '@maxim/contracts';
 import { USER_AGREEMENT_SHORT_NOTICE } from '../common/user-agreement-notice';
@@ -997,6 +999,36 @@ function createSettings(overrides: Record<string, unknown> = {}) {
     updatedAt: new Date(),
     ...overrides,
   };
+}
+
+export function installSpammerKickContinuationFixture(
+  service: ModerationService,
+  rule: string,
+  reason: string,
+) {
+  const register = jest.fn<
+    ReturnType<ModerationDeleteIntentService['ensureIntentWithRuleFollowup']>,
+    Parameters<ModerationDeleteIntentService['ensureIntentWithRuleFollowup']>
+  >(async (input) => {
+    if (input.ruleCode !== rule || input.reasonKey !== reason)
+      throw new Error('Unexpected spammer continuation fixture reason');
+    return { followupId: 'fixture-spammer-followup' };
+  });
+  const attempt = jest
+    .fn<
+      ReturnType<ModerationRuleFollowupService['attempt']>,
+      Parameters<ModerationRuleFollowupService['attempt']>
+    >()
+    .mockResolvedValue(true);
+  const fixture = service as unknown as { moderationDeleteIntentService?: object };
+  Object.assign(service, {
+    moderationDeleteIntentService: {
+      ...fixture.moderationDeleteIntentService,
+      ensureIntentWithRuleFollowup: register,
+    },
+    moderationRuleFollowupService: { attempt },
+  });
+  return { register, attempt };
 }
 
 function createUpdate(sourceDate = new Date()): MaxUpdate {

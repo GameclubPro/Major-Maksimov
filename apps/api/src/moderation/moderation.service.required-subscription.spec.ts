@@ -17,10 +17,10 @@ import {
   extractSqlText,
   userMention,
   expectImmediateDeleteMessage,
-  expectImmediateKickMember,
   expectImmediateBanMember,
   createMaxApiError,
   createDeferred,
+  installSpammerKickContinuationFixture,
   createSettings,
   createUpdate,
   createRequiredSubscriptionRedisCounter,
@@ -62,7 +62,8 @@ function installRequiredSubscriptionFixtureGuards(
     },
     executeModerationDelete: jest.fn(
       async (input: EnsureModerationDeleteIntentInput, options?: unknown) => {
-        if (boundary.moderationDeleteIntentService) return original(input, options);
+        if (boundary.moderationDeleteIntentService && !confirmedSpammerReason)
+          return original(input, options);
         const result = await boundary.deleteMessageImmediatelyLegacy(
           input.chatId,
           input.messageId,
@@ -5539,13 +5540,15 @@ describe('ModerationService', () => {
           reasonKey: 'LOCAL_ADMIN_BLOCK:message-delete',
         },
       );
+      const { register, attempt } = installSpammerKickContinuationFixture(
+        service,
+        'LOCAL_ADMIN_BLOCK_MESSAGE_DELETE',
+        'LOCAL_ADMIN_BLOCK:message-delete',
+      );
       const trackingSpy = jest.spyOn(
         service as any,
         'trackAndRegisterGlobalSpammerWithHotPathBudget',
       );
-      const ensureDeleteIntent = jest
-        .spyOn(service as any, 'ensureModerationDeleteIntent')
-        .mockResolvedValue(undefined);
       (service as any).webhookHotTimeoutChatBackoffUntilMs.set('chat-1', Date.now() + 60_000);
       const update = createUpdate();
 
@@ -5554,22 +5557,17 @@ describe('ModerationService', () => {
       expect(prisma.adminGlobalSpammerExemption.findMany).toHaveBeenCalledTimes(1);
       expect(trackingSpy).not.toHaveBeenCalled();
       expectImmediateDeleteMessage(maxClient.deleteMessage, 'chat-1', 'msg-1');
-      expectImmediateKickMember(maxClient.kickMember, 'chat-1', 'user-1');
-      expect(ensureDeleteIntent).toHaveBeenCalledWith(
+      expect(attempt).toHaveBeenCalledWith('fixture-spammer-followup');
+      expect(maxClient.kickMember).not.toHaveBeenCalled();
+      expect(register).toHaveBeenCalledWith(
         expect.objectContaining({
           ruleCode: 'LOCAL_ADMIN_BLOCK_MESSAGE_DELETE',
           sourceMessageAt: update.message!.createdAt,
         }),
+        expect.any(String),
+        expect.objectContaining({ updateType: 'message_created' }),
       );
-      expect(prisma.moderationEvent.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          chatId: 'chat-1',
-          userId: 'user-1',
-          messageId: 'msg-1',
-          ruleCode: 'LOCAL_ADMIN_BLOCK',
-          action: SanctionAction.KICK,
-        }),
-      });
+      expect(prisma.moderationEvent.create).not.toHaveBeenCalled();
       expect(ruleEngine.detect).not.toHaveBeenCalled();
     });
 
@@ -5645,6 +5643,11 @@ describe('ModerationService', () => {
         },
       );
       (service as any).globalSpammerIntelligence = globalSpammerIntelligence;
+      const { register, attempt } = installSpammerKickContinuationFixture(
+        service,
+        'GLOBAL_SPAMMER_MESSAGE_DELETE',
+        'GLOBAL_SPAMMER:known-message-delete',
+      );
       const trackingSpy = jest.spyOn(
         service as any,
         'trackAndRegisterGlobalSpammerWithHotPathBudget',
@@ -5663,16 +5666,10 @@ describe('ModerationService', () => {
         recordDecision: true,
       });
       expectImmediateDeleteMessage(maxClient.deleteMessage, 'chat-1', 'msg-1');
-      expectImmediateKickMember(maxClient.kickMember, 'chat-1', 'user-1');
-      expect(prisma.moderationEvent.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          chatId: 'chat-1',
-          userId: 'user-1',
-          messageId: 'msg-1',
-          ruleCode: 'GLOBAL_SPAMMER_KICK',
-          action: SanctionAction.KICK,
-        }),
-      });
+      expect(register).toHaveBeenCalledTimes(1);
+      expect(attempt).toHaveBeenCalledWith('fixture-spammer-followup');
+      expect(maxClient.kickMember).not.toHaveBeenCalled();
+      expect(prisma.moderationEvent.create).not.toHaveBeenCalled();
       expect(ruleEngine.detect).not.toHaveBeenCalled();
     });
 

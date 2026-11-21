@@ -1,3 +1,6 @@
+import type { ModerationDeleteIntentService } from './moderation-delete-intent.service';
+import type { ModerationRuleFollowupService } from './moderation-rule-followup.service';
+import { ModerationRuleFollowupSourceExpiredError } from './moderation-rule-followup-persistence';
 import {
   ModerationService,
   createDeferred,
@@ -13,9 +16,30 @@ const message = {
   userId: 'user-spammer-delete',
   messageId: 'message-spammer-delete',
   text: 'https://vk.me/123456789',
-  createdAt: '2026-09-24T00:00:00.000Z',
+  createdAt: new Date().toISOString(),
+  updateType: 'message_created',
   reason: 'Detected in 6 unique chats within 2 minutes',
 };
+
+function attachFollowupDoubles(service: ModerationService) {
+  const ensure = jest
+    .fn<
+      ReturnType<ModerationDeleteIntentService['ensureIntentWithRuleFollowup']>,
+      Parameters<ModerationDeleteIntentService['ensureIntentWithRuleFollowup']>
+    >()
+    .mockResolvedValue({ followupId: 'own-continuation' });
+  const attempt = jest
+    .fn<
+      ReturnType<ModerationRuleFollowupService['attempt']>,
+      Parameters<ModerationRuleFollowupService['attempt']>
+    >()
+    .mockResolvedValue(true);
+  Object.assign(service, {
+    moderationDeleteIntentService: { ensureIntentWithRuleFollowup: ensure },
+    moderationRuleFollowupService: { attempt },
+  });
+  return { ensure, attempt };
+}
 
 function createHarness() {
   const prisma = {
@@ -43,7 +67,7 @@ function createHarness() {
   const internal = service as any;
   jest.spyOn(internal, 'isUserKnownGlobalSpammer').mockResolvedValue(true);
   jest.spyOn(internal.logger, 'warn').mockImplementation(() => undefined);
-  const ensure = jest.spyOn(internal, 'ensureModerationDeleteIntent').mockResolvedValue(undefined);
+  const { ensure, attempt } = attachFollowupDoubles(service);
   const execute = jest.spyOn(internal, 'executeModerationDelete').mockResolvedValue({
     accepted: true,
     gone: true,
@@ -52,7 +76,7 @@ function createHarness() {
   });
   const claim = jest.spyOn(internal, 'claimMessageScopedModerationAction').mockResolvedValue(true);
   const kick = jest.spyOn(internal, 'kickAndLogKnownSpammerEvent').mockResolvedValue(true);
-  return { internal, ensure, execute, claim, kick };
+  return { internal, ensure, execute, claim, kick, attempt };
 }
 
 describe.each([
@@ -60,35 +84,53 @@ describe.each([
   'handleLocalAdminBlockedSenderMessage',
   'deleteAndKickDetectedGlobalSpammer',
 ])('%s deletion ownership', (handler) => {
-  it('retries deletion independently of an existing sanction claim', async () => {
+  it('registers before DELETE, then hands only the exact confirmed result to its continuation', async () => {
     const h = createHarness();
-    h.claim.mockResolvedValue(false);
-
     await expect(h.internal[handler](message)).resolves.toBe(true);
-
     expect(h.ensure).toHaveBeenCalledWith(
       expect.objectContaining({
         messageId: message.messageId,
         sourceMessageAt: message.createdAt,
+        subjectUserId: message.userId,
       }),
+      expect.stringMatching(/^[0-9a-f]{64}$/u),
+      expect.objectContaining({ version: 1, updateType: 'message_created' }),
     );
     expect(h.execute).toHaveBeenCalledTimes(1);
     expect(h.ensure.mock.invocationCallOrder[0]).toBeLessThan(
       h.execute.mock.invocationCallOrder[0],
     );
-    expect(h.execute.mock.invocationCallOrder[0]).toBeLessThan(h.claim.mock.invocationCallOrder[0]);
+    expect(h.execute.mock.invocationCallOrder[0]).toBeLessThan(
+      h.attempt.mock.invocationCallOrder[0],
+    );
+    expect(h.attempt).toHaveBeenCalledWith('own-continuation');
+    expect(h.claim).not.toHaveBeenCalled();
     expect(h.kick).not.toHaveBeenCalled();
   });
 
-  it.each([true, false])('does not treat a kick as deletion when claim=%s', async (claimed) => {
+  it('cannot attach a new KICK to an already settled DELETE', async () => {
     const h = createHarness();
-    h.claim.mockResolvedValue(claimed);
+    h.ensure.mockResolvedValue({ followupId: null });
+    await expect(h.internal[handler](message)).resolves.toBe(true);
+    expect(h.attempt).not.toHaveBeenCalled();
+  });
+
+  it('declines an expired source before deletion or dispatch', async () => {
+    const h = createHarness();
+    h.ensure.mockRejectedValue(new ModerationRuleFollowupSourceExpiredError('expired'));
+    await expect(h.internal[handler](message)).resolves.toBe(false);
+    expect(h.execute).not.toHaveBeenCalled();
+    expect(h.attempt).not.toHaveBeenCalled();
+  });
+
+  it('continues other message checks when DELETE was not accepted', async () => {
+    const h = createHarness();
     h.execute.mockResolvedValue({ accepted: false, gone: false, deleted: false });
 
     await expect(h.internal[handler](message)).resolves.toBe(false);
 
     expect(h.execute).toHaveBeenCalledTimes(1);
-    expect(h.claim).not.toHaveBeenCalled();
+    expect(h.attempt).not.toHaveBeenCalled();
     expect(h.kick).not.toHaveBeenCalled();
   });
 
@@ -105,7 +147,7 @@ describe.each([
     const h = createHarness();
     h.execute.mockResolvedValue({ accepted: true, gone: false, deleted: false });
     await expect(h.internal[handler](message)).resolves.toBe(true);
-    expect(h.claim).not.toHaveBeenCalled();
+    expect(h.attempt).not.toHaveBeenCalled();
     expect(h.kick).not.toHaveBeenCalled();
   });
 
@@ -113,7 +155,7 @@ describe.each([
     const h = createHarness();
     h.execute.mockResolvedValue({ accepted: true, gone: true, deleted: true });
     await expect(h.internal[handler](message)).resolves.toBe(true);
-    expect(h.claim).not.toHaveBeenCalled();
+    expect(h.attempt).not.toHaveBeenCalled();
     expect(h.kick).not.toHaveBeenCalled();
   });
 
@@ -124,7 +166,7 @@ describe.each([
     await expect(h.internal[handler](message)).rejects.toThrow('intent persistence unavailable');
 
     expect(h.execute).not.toHaveBeenCalled();
-    expect(h.claim).not.toHaveBeenCalled();
+    expect(h.attempt).not.toHaveBeenCalled();
     expect(h.kick).not.toHaveBeenCalled();
   });
 });
@@ -149,7 +191,7 @@ describe('global spammer tracking handoff', () => {
   it('keeps enforcement awaited beyond the observation timeout', async () => {
     jest.useFakeTimers();
     const h = createHarness();
-    const persistence = createDeferred<void>();
+    const persistence = createDeferred<{ followupId: string }>();
     const started = createDeferred<void>();
     h.ensure.mockImplementation(() => {
       started.resolve();
@@ -166,12 +208,13 @@ describe('global spammer tracking handoff', () => {
       expect(settled).toBe(false);
       expect(h.execute).not.toHaveBeenCalled();
 
-      persistence.resolve();
+      persistence.resolve({ followupId: 'delayed-continuation' });
       await expect(operation).resolves.toEqual({ handled: true, skipKnownSpammerCheck: true });
       expect(h.execute).toHaveBeenCalledTimes(1);
-      expect(h.kick).toHaveBeenCalledTimes(1);
+      expect(h.attempt).toHaveBeenCalledWith('delayed-continuation');
+      expect(h.kick).not.toHaveBeenCalled();
     } finally {
-      persistence.resolve();
+      persistence.resolve({ followupId: 'delayed-continuation' });
       jest.useRealTimers();
     }
   });
@@ -221,7 +264,7 @@ describe('spammer deletion in the message pipeline', () => {
     );
     const internal = service as any;
     jest.spyOn(internal, 'isUserKnownGlobalSpammer').mockResolvedValue(true);
-    jest.spyOn(internal, 'ensureModerationDeleteIntent').mockResolvedValue(undefined);
+    attachFollowupDoubles(service);
     jest.spyOn(internal, 'executeModerationDelete').mockResolvedValue({
       accepted: false,
       gone: false,

@@ -1,3 +1,8 @@
+import {
+  isSpammerKickRule,
+  matchesSpammerKickReason,
+  spammerKickPolicySha256,
+} from './spammer-kick-source';
 import { createHash } from 'node:crypto';
 import { Prisma } from '../prisma/prisma-client';
 import type { EnsureModerationDeleteIntentInput } from './moderation-delete-intent.types';
@@ -19,8 +24,21 @@ export function assertRuleFollowupSourceCurrent(
   envelope: ModerationRuleFollowupEnvelope,
   nowMs = Date.now(),
 ): Date {
+  const rule = input.ruleCode ?? '';
+  const metadata = input.event?.metadata;
+  const expectedSpammerSource =
+    isSpammerKickRule(rule) &&
+    input.entityType === 'CHAT' &&
+    input.messageAuthorKind === 'user' &&
+    input.event?.userId === input.subjectUserId &&
+    envelope.originBotId === (input.originBotId ?? null) &&
+    policySha256 === spammerKickPolicySha256(rule) &&
+    metadata &&
+    typeof metadata === 'object' &&
+    !Array.isArray(metadata) &&
+    matchesSpammerKickReason(rule, input.reasonKey, (metadata as Record<string, unknown>).reason);
   if (
-    !DURABLE_RULE_FOLLOWUP_RULES.has(input.ruleCode ?? '') ||
+    (!DURABLE_RULE_FOLLOWUP_RULES.has(rule) && !expectedSpammerSource) ||
     !input.chatId.trim() ||
     !input.messageId.trim() ||
     !input.reasonKey.trim() ||
@@ -67,6 +85,7 @@ export async function persistRuleFollowupBeforeDelete(
       AND intent."source_message_at" = ${sourceAt}
       AND intent."status" IN ('PENDING', 'RETRYABLE', 'WAITING_CAPABILITY')
       AND intent."delete_dispatch_started_at" IS NULL AND intent."remote_delete_succeeded_at" IS NULL
+      ${isSpammerKickRule(input.ruleCode ?? '') ? Prisma.sql`AND intent."attempt_count" = 0 AND intent."first_attempt_at" IS NULL` : Prisma.empty}
       AND (clock_timestamp() AT TIME ZONE 'UTC') < ${new Date(sourceAt.getTime() + 300_000)}
     ON CONFLICT ("intent_id", "reason_key") DO NOTHING
   `);

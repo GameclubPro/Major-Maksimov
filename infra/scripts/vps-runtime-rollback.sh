@@ -578,6 +578,14 @@ maxim_topology_require_night_open_notice_cleanup_reader "$TARGET_FULL_SHA"
 maxim_topology_require_link_rules_policy_reader "$TARGET_FULL_SHA"
 maxim_topology_require_retired_super_ban "$TARGET_FULL_SHA"
 maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
+maxim_topology_require_spammer_kick_reader "$TARGET_FULL_SHA"
+# FLAG: A ref-based rollback also switches controller source. Use rollback-release
+# for a compatible reader that predates the durable writer's rollback controller.
+if ! git show "$TARGET_FULL_SHA:infra/scripts/vps-runtime-rollback.sh" |
+    grep -E '^maxim_topology_require_spammer_kick_reader[[:space:]]' >/dev/null; then
+  echo "Ref-based rollback would remove the spammer removal reader floor; select its release manifest." >&2
+  exit 1
+fi
 if ! MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" \
   node infra/scripts/release-manifest.mjs validate-current >/dev/null; then
   select_runtime_rollback_recovery_base
