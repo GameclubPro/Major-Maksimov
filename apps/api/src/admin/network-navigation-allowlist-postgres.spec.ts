@@ -158,14 +158,39 @@ integration('bounded network allowlist transactions with PostgreSQL', () => {
     await expect(allowlist.validate(chatId, intent(), first.witness, actor)).rejects.toBeInstanceOf(
       ConflictException,
     );
-    await db.domainAllowlist.create({
-      data: { chatId, domain: 'domain:expires.example', removeAfterAt: new Date(Date.now() + 80) },
+    const now = Date.now();
+    const expiresAt = new Date(now + 60_000);
+    jest.useFakeTimers({
+      now,
+      doNotFake: [
+        'hrtime',
+        'performance',
+        'nextTick',
+        'queueMicrotask',
+        'setImmediate',
+        'clearImmediate',
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+      ],
     });
-    const expiring = await allowlist.read(chatId);
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    await expect(
-      allowlist.validate(chatId, intent(), expiring.witness, actor),
-    ).rejects.toBeInstanceOf(ConflictException);
+    try {
+      await db.domainAllowlist.create({
+        data: { chatId, domain: 'domain:expires.example', removeAfterAt: expiresAt },
+      });
+      const expiring = await allowlist.read(chatId);
+      expect(expiring.witness.nextExpiryAt).toBe(expiresAt.toISOString());
+      await expect(
+        allowlist.validate(chatId, intent(), expiring.witness, actor),
+      ).resolves.toMatchObject({ added: 1 });
+      jest.setSystemTime(expiresAt);
+      await expect(
+        allowlist.validate(chatId, intent(), expiring.witness, actor),
+      ).rejects.toBeInstanceOf(ConflictException);
+    } finally {
+      jest.useRealTimers();
+    }
     expect(await db.auditLog.count({ where: { chatId } })).toBe(0);
   });
   it('validateOnly has zero writes and scalar/list/audit/receipt roll back together on lost receipt', async () => {
