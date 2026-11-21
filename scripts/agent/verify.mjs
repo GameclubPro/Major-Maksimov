@@ -11,6 +11,8 @@ import { DEFAULT_CONFIG_PATH, loadImpactConfig } from './impact-config.mjs';
 import { parseImpactPlanArgs } from './plan.mjs';
 import { assessPrismaSchemaImpact } from './prisma-impact.mjs';
 import { runPreflight } from './preflight.mjs';
+import { selectEarlyCommands } from './early-checks.mjs';
+import { buildMigrationReadiness, renderMigrationReadiness } from './migration-readiness.mjs';
 import { runVerificationCommand } from './verification-command.mjs';
 import {
   assertStagedWorktreeMatches,
@@ -89,6 +91,7 @@ export async function runVerifyCli(
     requiresSubmissionAggregate: true,
     requiresExactShaCi: true,
     snapshotTree: null,
+    migrationReadiness: null,
     error: null,
   };
 
@@ -101,6 +104,7 @@ export async function runVerifyCli(
     stage = 'planning';
     const config = await loadImpactConfig(options.configPath ?? DEFAULT_CONFIG_PATH);
     let plan = null;
+    let changedPaths;
 
     if (!options.full) {
       const changeSet = collectGitChanges({
@@ -111,6 +115,7 @@ export async function runVerifyCli(
         since: options.since,
       });
       result.root = changeSet.repoRoot;
+      changedPaths = changeSet.changedPaths;
       plan = createImpactPlan({
         config,
         changeSet,
@@ -119,10 +124,11 @@ export async function runVerifyCli(
       result.plan = plan;
       if (!json) io.stdout(renderImpactPlanHuman(plan, config));
     }
-    if (json) {
-      result.root ??= gitText(options.repo, ['rev-parse', '--show-toplevel']);
-      result.head = gitText(result.root, ['rev-parse', '--verify', 'HEAD']);
-    }
+    result.root ??= gitText(options.repo, ['rev-parse', '--show-toplevel']);
+    if (json) result.head = gitText(result.root, ['rev-parse', '--verify', 'HEAD']);
+    changedPaths ??= collectGitChanges({ cwd: result.root }).changedPaths;
+    result.migrationReadiness = buildMigrationReadiness(changedPaths);
+    if (result.migrationReadiness) log(`${renderMigrationReadiness(result.migrationReadiness)}\n`);
     stage = 'migration';
     if (plan?.migration.reviewRequired) {
       throw new Error('Verification stopped: a Prisma migration review is required.');
@@ -130,8 +136,9 @@ export async function runVerifyCli(
 
     stage = 'commands';
     const scripts = selectVerificationScripts({ config, plan, full: options.full });
-    const cwd = json ? result.root : options.repo;
-    result.commands = scripts.map(({ id, script }) => ({
+    const cwd = result.root;
+    const earlyCommands = await selectEarlyCommands(cwd, changedPaths);
+    const aggregateCommands = scripts.map(({ id, script }) => ({
       id,
       kind: 'npm-script',
       executable: 'npm',
@@ -142,10 +149,14 @@ export async function runVerifyCli(
       exitCode: null,
       signal: null,
     }));
+    if (options.dryRun) earlyCommands.forEach((command) => (command.status = 'planned'));
+    result.commands = [...earlyCommands, ...aggregateCommands];
     await assertScriptsExist(cwd, scripts);
     if (!json) {
       io.stdout(
-        `Verification commands:\n${scripts.map(({ script }) => `  npm run ${script}`).join('\n')}\n`,
+        `Verification commands:\n${result.commands
+          .map(({ executable, args }) => `  ${executable} ${args.join(' ')}`)
+          .join('\n')}\n`,
       );
     }
 
@@ -157,10 +168,12 @@ export async function runVerifyCli(
       result.snapshotTree = stagedTree;
       stage = 'preflight';
       (dependencies.runPreflight ?? runPreflight)(cwd, (line) => log(`${line}\n`));
-      for (const [index, { id, script }] of scripts.entries()) {
-        activeCommand = result.commands[index];
+      stage = 'snapshot-after-preflight';
+      if (stagedTree) assertStagedSnapshotUnchanged(cwd, stagedTree);
+      for (const command of result.commands) {
+        activeCommand = command;
         stage = 'command';
-        log(`\n[agent:verify] ${id} -> npm run ${script}\n`);
+        log(`\n[agent:verify] ${command.id}\n`);
         await runVerificationCommand(activeCommand, json ? log : null);
         activeCommand.status = 'passed';
         activeCommand.exitCode = 0;

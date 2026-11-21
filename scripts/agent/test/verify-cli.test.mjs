@@ -111,6 +111,33 @@ test('JSON run records a failed child exit and leaves subsequent commands unstar
   await assertNotRun(fixture, 'second');
 });
 
+test('a release prefix regression blocks the staged submission before the aggregate runs', async (t) => {
+  const fixture = await createFixture(t);
+  const sourcePath = 'infra/scripts/lib/deploy-lock.sh';
+  const earlyTest = 'infra/scripts/release-service-source-floor.test.mjs';
+  await mkdir(join(fixture.repo, 'infra/scripts/lib'), { recursive: true });
+  await writeFile(join(fixture.repo, sourcePath), '# Changed release boundary\n');
+  await writeFile(
+    join(fixture.repo, earlyTest),
+    "import test from 'node:test'; test('prefix', () => { throw new Error('prefix changed'); });\n",
+  );
+  git(fixture.repo, ['add', source, sourcePath, earlyTest]);
+
+  const dryRun = parseResult(invoke(fixture, ['--staged', '--dry-run', '--json']), 0);
+  assert.equal(dryRun.commands[0].id, 'early-node-tests');
+  assert.equal(dryRun.commands[0].status, 'planned');
+  assert.ok(dryRun.commands[0].args.includes(earlyTest));
+
+  const run = invoke(fixture, ['--staged', '--json'], { preflight: 'pass' });
+  const result = parseResult(run, 2);
+  assert.equal(result.error.commandId, 'early-node-tests');
+  assert.equal(result.commands[0].status, 'failed');
+  assert.ok(result.commands.slice(1).every(({ status }) => status === 'not-run'));
+  assert.match(run.stderr, /prefix changed/u);
+  await assertNotRun(fixture, 'first');
+  await assertNotRun(fixture, 'second');
+});
+
 test('migration review blocks JSON execution and dry-run before running any checks', async (t) => {
   const fixture = await createFixture(t);
   await writeFile(join(fixture.repo, schema), 'model Example {\n id String @id\n age Int?\n}\n');
@@ -296,8 +323,11 @@ const code = await runVerifyCli(process.argv.slice(1), undefined, {
   runPreflight(root, log) { log('fixture preflight'); ${preflight === 'fail' ? "throw new Error('fixture refused');" : ''} }
 });
 process.exitCode = code;`;
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
   return spawnSync(process.execPath, ['--input-type=module', '-e', loader, '--', ...options], {
     encoding: 'utf8',
+    env,
   });
 }
 

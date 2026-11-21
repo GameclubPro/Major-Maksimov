@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { setTimeout as pause } from 'node:timers/promises';
 import { ConfigService } from '@nestjs/config';
 import type Redis from 'ioredis';
 import { createCommercialLlmRedis } from '../moderation/commercial/commercial-llm-shadow.lease';
@@ -11,6 +10,7 @@ import {
 import {
   COMMERCIAL_AI_POOL_EXPECTED,
   COMMERCIAL_AI_POOL_READ_KEYS,
+  commercialAiPoolReadSchema,
   READ_COMMERCIAL_AI_POOL,
 } from './safety-desk-commercial-ai-pool-read';
 import {
@@ -41,32 +41,32 @@ integration('commercial pool diagnostics with real Redis', () => {
     if (owned) await redis.del(...COMMERCIAL_AI_POOL_READ_KEYS);
   });
   afterAll(() => redis?.disconnect());
-  const read = async () => {
-    const at = Date.now();
-    const raw = await redis.eval(
-      READ_COMMERCIAL_AI_POOL,
-      COMMERCIAL_AI_POOL_READ_KEYS.length,
-      ...COMMERCIAL_AI_POOL_READ_KEYS,
-      COMMERCIAL_AI_POOL_EXPECTED,
-    );
+  const readArgs = [
+    READ_COMMERCIAL_AI_POOL,
+    COMMERCIAL_AI_POOL_READ_KEYS.length,
+    ...COMMERCIAL_AI_POOL_READ_KEYS,
+    COMMERCIAL_AI_POOL_EXPECTED,
+  ] as const;
+  function snapshot(at: number, raw: unknown) {
     if (typeof raw !== 'string') throw new Error('Expected bounded projection');
     return { kind: 'value' as const, at, raw };
-  };
-  async function node(id: CommercialLlmPoolNodeId, ready = true, ttl = 6000) {
-    const keys = commercialLlmPoolNodeKeys(id),
-      session = randomUUID();
+  }
+  const read = async () => snapshot(Date.now(), await redis.eval(...readArgs));
+  function registration(id: CommercialLlmPoolNodeId, ready: boolean) {
+    const session = randomUUID();
+    const keys = commercialLlmPoolNodeKeys(id);
+    const heartbeat = JSON.stringify({
+      nodeId: id,
+      session,
+      ready,
+      identity: COMMERCIAL_LLM_POOL_PROFILES[id].identity,
+    });
+    return { keys, session, heartbeat };
+  }
+  async function node(id: CommercialLlmPoolNodeId, ready = true) {
+    const { keys, session, heartbeat } = registration(id, ready);
     await redis.set(keys.lease, session, 'PX', 10000);
-    await redis.set(
-      keys.heartbeat,
-      JSON.stringify({
-        nodeId: id,
-        session,
-        ready,
-        identity: COMMERCIAL_LLM_POOL_PROFILES[id].identity,
-      }),
-      'PX',
-      ttl,
-    );
+    await redis.set(keys.heartbeat, heartbeat, 'PX', 6000);
     return { keys, session };
   }
   it('distinguishes ready, reserved and disconnected nodes without returning secrets or reading slot bodies', async () => {
@@ -157,13 +157,29 @@ integration('commercial pool diagnostics with real Redis', () => {
     expect(await redis.get(gpu.keys.lease)).toBe(gpu.session);
   });
   it('uses real TTL expiry and does not keep cached readiness alive', async () => {
-    await node('pc-a-4b', true, 60);
-    const result = await read();
-    await pause(90);
-    expect(projectCommercialAiPool(config, result, Date.now()).nodes?.[1].state).toBe('STALE');
-    expect(projectCommercialAiPool(config, await read(), Date.now()).nodes?.[1].state).toBe(
-      'OFFLINE',
-    );
+    const { keys, session, heartbeat } = registration('pc-a-4b', true);
+    const at = Date.now();
+    // Read the live key in the same Redis transaction that grants its TTL.
+    const responses = await redis
+      .multi()
+      .set(keys.lease, session, 'PX', 10000)
+      .set(keys.heartbeat, heartbeat, 'PX', 6000)
+      .eval(...readArgs)
+      .pexpireat(keys.heartbeat, 1)
+      .eval(...readArgs)
+      .exec();
+    if (!responses) throw new Error('Expected Redis expiry transaction to complete');
+    expect(responses.map(([error]) => error)).toEqual([null, null, null, null, null]);
+    expect(responses[3][1]).toBe(1);
+    const cached = snapshot(at, responses[2][1]);
+    const fresh = snapshot(at, responses[4][1]);
+    const observed = commercialAiPoolReadSchema.parse(JSON.parse(cached.raw)).nodes[1];
+    expect(observed).toMatchObject({ nodeId: 'pc-a-4b', state: 'READY' });
+    expect(observed.ttlMs).toBeGreaterThan(0);
+    const deadline = at + observed.ttlMs;
+    expect(projectCommercialAiPool(config, cached, deadline - 1).nodes?.[1].state).toBe('READY');
+    expect(projectCommercialAiPool(config, cached, deadline).nodes?.[1].state).toBe('STALE');
+    expect(projectCommercialAiPool(config, fresh, at).nodes?.[1].state).toBe('OFFLINE');
   });
   it.each(['identity', 'session', 'type', 'oversize', 'permanent', 'slot-type'] as const)(
     'refuses %s corruption while preserving data',

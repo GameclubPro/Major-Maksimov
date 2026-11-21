@@ -75,7 +75,8 @@ The default human interface used by the commit helper remains available.
 | `mode`, `dryRun`                                    | `worktree`, `staged`, `range`, `since` or `full`; mode may be null for invalid arguments.                                           |
 | `status`                                            | `planned`, `passed` or `failed`. Planning never establishes validation.                                                             |
 | `plan`                                              | Unmodified impact-plan v1, or null for full mode / failure before planning.                                                         |
-| `commands`                                          | Ordered selection from `selectVerificationScripts`, after existing aggregate deduplication.                                         |
+| `commands`                                          | Selected early checks followed by the deduplicated aggregate commands.                                                              |
+| `migrationReadiness`                                | Local path-based readiness guidance or null. It does not query production.                                                          |
 | `snapshotTree`                                      | Staged tree guarded during this run, otherwise null. This is not a reusable QA attestation.                                         |
 | `error`                                             | Null or `{stage, code, message, commandId}`. Migration refusal uses `MIGRATION_REVIEW_REQUIRED`.                                    |
 | `requiresSubmissionAggregate`, `requiresExactShaCi` | Both true, even after successful local execution.                                                                                   |
@@ -94,9 +95,16 @@ The full aggregate follows the order of the public `npm run check` script.
 These outputs introduce no verification cache and do not replace the commit helper, exact-SHA CI,
 guarded deployment, component manifests or production acceptance.
 
-Preflight checks guarded file sizes through the same limits used by `check:refactor-guards`, before
-expensive validation begins. The full refactor check continues to verify imports, cycles and its
-other invariants during the submission aggregate.
+Preflight verifies the Node version from `.nvmrc` and checks guarded source sizes before
+expensive validation. It also selects focused tests by changed path for the SQL row reader,
+moderation receipts, mini app preview architecture and release rollback guards. The same selection
+runs in the staged commit helper and in `node scripts/agent/preflight.mjs` for the working copy.
+Keep the selection small and use the public focused runners. Store-backed cases require dedicated
+focused verification.
+
+When schema, migration or routing index policy paths change, preflight points to
+[early migration readiness](../operations/runbooks/webhook-routing-index.md#early-migration-readiness).
+Use the approved capacity report and release evidence before committing to a migration route.
 
 ## Focused Checks Before Submission
 
@@ -150,7 +158,7 @@ aligned with the [maintained integration runbook](../operations/runbooks/karavan
 | Canonical commands, authority, payload hash | [Shared schemas](../../packages/contracts/src/karavan-marketplace.ts), [proxy](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-proxy.service.ts), [management tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-management.spec.ts).                                                                             |
 | Current human/bot authority and binding     | [Authority service](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-authority.service.ts), [binding status](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-binding-status.service.ts), [native authority tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-authority-postgres.spec.ts). |
 | Retained one-time seller/historical handoff | [Handoff service](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-handoff.service.ts), [integration controller tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-integration.controller.spec.ts).                                                                                                                |
-| Current shop entry and uncertain commands | [Compact shop](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), [management link](../../apps/miniapp/test/karavan-shop-management-link.test.ts), [connection/recovery flow](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [chat settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs).                                                                                                                                                                                                               |
+| Current shop entry and uncertain commands   | [Compact shop](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), [management link](../../apps/miniapp/test/karavan-shop-management-link.test.ts), [connection/recovery flow](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [chat settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs).                                         |
 
 Karavan's matching handlers and release configuration remain documented in its own
 `docs/chat-marketplaces-release.md`. Pair configuration checks do not prove protocol or runtime

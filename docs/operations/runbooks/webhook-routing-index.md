@@ -96,6 +96,36 @@ it was rolled back. The four existing
 historical receipt variants retain their exact source/successor/catalog compatibility checks.
 No receipt is fabricated or edited by the adapter.
 
+## Early migration readiness
+
+Local preflight screens changed Git paths before expensive validation. A changed migration
+after the optional index can make the release fall outside the exact deferral lists. Review
+the candidate's ordered migration list and checksums, including both sides of any rename.
+A schema-only change still needs the ordinary Prisma compatibility review. The local report
+describes source changes and leaves production receipts and capacity unknown.
+
+For an API candidate that may need online preparation, use the existing read-only reports
+before investing in an expensive release attempt. Use the reviewed operator path and run
+one report at a time.
+
+1. Run `./infra/scripts/vps-connect.sh pair-release-state` to record the installed API
+   identity. Record the candidate SHA and observation time separately.
+2. Run `./infra/scripts/vps-connect.sh postgres-audit multibot-preparation` for
+   `webhook_events` `table_bytes` including TOAST. Its fixed index and receipt list covers
+   the earlier multibot preparation. Leave this routing index and its receipt unverified
+   if there is no current evidence for them.
+3. If the candidate needs the spammer projection index, run
+   `./infra/scripts/vps-connect.sh postgres-audit storage` and look up `spammer_observations`
+   in `largest_relations`. Use `table_bytes` including TOAST. An omitted table, a truncated
+   catalog or an incomplete report leaves the capacity assessment unresolved.
+
+If the routing index still needs preparation, a measured size above 160 GiB predicts a
+capacity refusal. For the deferred spammer projection, the corresponding limit is 3 GiB.
+Resolve a likely refusal before release. The early reports leave final admission to the
+controller, which verifies exact candidate checksums, live index and receipt state, filesystem
+identity and capacity under the deploy lock. `deploy --plan` synchronizes the server checkout.
+Keep it in the guarded release path. The local report works offline.
+
 ## Admission and limits
 
 | Bound                                             | Fixed value   |
