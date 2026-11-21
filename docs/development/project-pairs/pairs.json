@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "pairs": {
+    "karavan": {
+      "title": "Майор + Караван",
+      "card": "karavan.md",
+      "profiles": ["chat-shop@1"],
+      "pilot": "Из настроек чата открыть его магазин, затем вернуться в тот же чат. Чужой чат не даёт прав управления.",
+      "checks": {
+        "major": "SHOP_SIMPLE_ONLY=connection SHOP_SIMPLE_ENGINE=chromium SHOP_SIMPLE_THEME=light node apps/miniapp/test/karavan-shop-simple.browser.mjs (WSL)",
+        "partner": "node --import tsx --test tests/client-marketplace-launch.test.ts"
+      }
+    },
+    "market": {
+      "title": "Майор + Биржа",
+      "card": "market.md",
+      "profiles": ["birzhik-core@1", "statistics-central@1"],
+      "pilot": "Открыть существующую карточку сообщества в Биржике, сохранив владельца и права второго администратора.",
+      "checks": {
+        "major": "node scripts/agent/focused.mjs --test apps/api/src/integrations/marketplace/marketplace-navigation.spec.ts (WSL)",
+        "partner": "node --import tsx --test tests/maxim-launch.test.ts"
+      }
+    },
+    "igrik": {
+      "title": "Майор + Игрик",
+      "card": "igrik.md",
+      "profiles": [],
+      "pilot": "Выбрать сценарий между продуктами и подтвердить его с владельцем задачи. Каталог и игры проверяются в локальном демо Игрика.",
+      "checks": {
+        "partner": "$env:VITE_DEMO_MODE='true'; npm.cmd run dev:miniapp (Windows)"
+      }
+    }
+  }
+}
