@@ -1,3 +1,4 @@
+import { isSpammerKickRule } from './spammer-kick-followup';
 import { resolveMessageLimitsRuleEscalation } from './moderation-rule-escalation';
 import { MESSAGE_LIMITS_ESCALATION_WINDOW_HOURS } from './moderation.service.support';
 import { RuntimeWorkerOwner, type RuntimeWorker } from '../runtime/runtime-worker-shutdown';
@@ -211,8 +212,11 @@ export class ModerationRuleFollowupService
       // settle SQL; unknown SENDs and missing member proofs never authorize fresh dispatch.
       const phase = record(row.effects).phase;
       if (
-        record(row.actionPlan).action === 'BAN' &&
-        ['UNKNOWN', 'BAN_STARTED', 'BAN_CONFIRMED'].includes(String(phase))
+        (record(row.actionPlan).action === 'BAN' &&
+          ['UNKNOWN', 'BAN_STARTED', 'BAN_CONFIRMED'].includes(String(phase))) ||
+        (isSpammerKickRule(row.ruleCode) &&
+          record(row.actionPlan).action === 'KICK' &&
+          ['KICK_STARTED', 'UNKNOWN', 'SETTLED'].includes(String(phase)))
       ) {
         if (await this.attempt(row.id, true)) handled += 1;
       } else
@@ -258,6 +262,15 @@ export class ModerationRuleFollowupService
     heartbeat.unref();
     try {
       const row = await this.prisma.moderationRuleFollowup.findUniqueOrThrow({ where: { id } });
+      if (isSpammerKickRule(row.ruleCode)) {
+        const executor = this.moduleRef.get<ModerationRuleFollowupExecutor>(
+          MODERATION_RULE_FOLLOWUP_EXECUTOR,
+          { strict: false },
+        );
+        const status = await executor.executeSpammerKickFollowup(row, leaseToken, receiptOnly);
+        await this.finish(id, leaseToken, status);
+        return true;
+      }
       if (!readRuleFollowupEnvelope(row.envelope)) throw new ModerationRuleSanctionRejectedError();
       if (
         !receiptOnly &&
@@ -298,7 +311,7 @@ export class ModerationRuleFollowupService
         // FLAG: Preparation performs reads and atomic SQL only. Its failure cannot create a
         // new unknown MAX effect; retained unknown phases still fence earlier execution.
         (executionStarted && isAmbiguousMaxSendError(error)) ||
-        ['BAN_STARTED', 'UNKNOWN'].includes(phase)
+        ['BAN_STARTED', 'KICK_STARTED', 'UNKNOWN'].includes(phase)
           ? 'AMBIGUOUS'
           : error instanceof ModerationRuleSanctionRejectedError ||
               error instanceof RuleFollowupSanctionInvalidError

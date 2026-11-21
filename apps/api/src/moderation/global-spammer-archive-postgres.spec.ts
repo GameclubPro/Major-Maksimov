@@ -27,7 +27,7 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       setup = createPrismaClient(databaseUrl, { max: 1, statement_timeout: 10000 });
       // FLAG: Archival selects globally. Own both tables so no other suite's registry can be deleted.
       await setup.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
-      for (const table of ['global_spammers', 'global_spammer_archives']) {
+      for (const table of ['global_spammers', 'global_spammer_archives', 'spammer_observations']) {
         await setup.$executeRawUnsafe(
           `CREATE TABLE "${schema}"."${table}" (LIKE public."${table}" INCLUDING ALL)`,
         );
@@ -145,6 +145,65 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       expect(queries.some((query) => /\bCOUNT\s*\(/iu.test(query))).toBe(true);
       expect(await db.globalSpammerArchive.count({})).toBe(2);
       expect(await db.globalSpammer.count({ where: { expiresAt: { gt: now } } })).toBe(futureCount);
+    });
+
+    it('prunes expired evidence without overwriting a newly renewed version', async () => {
+      const renewedExpiry = new Date(now.getTime() + 60_000);
+      const observation = {
+        userId: 'synthetic-evidence',
+        source: 'FANOUT_HIGH',
+        score: 1,
+        reason: 'FANOUT_HIGH',
+        expiresAt: renewedExpiry,
+        rawEvidenceExpiresAt: new Date(now.getTime() - 60_000),
+        normalizedFeatures: { excerpt: 'expired-original' },
+        evidence: { excerpt: 'expired-original' },
+      };
+      await db.spammerObservation.createMany({
+        data: [
+          { ...observation, id: 'stable-evidence', evidenceHash: 'stable' },
+          { ...observation, id: 'renewed-evidence', evidenceHash: 'renewed' },
+        ],
+      });
+      const concurrentWriter = db.$extends({
+        query: {
+          spammerObservation: {
+            async findMany({ args, query }) {
+              const selected = await query(args);
+              await db.spammerObservation.update({
+                where: { id: 'renewed-evidence' },
+                data: {
+                  rawEvidenceExpiresAt: renewedExpiry,
+                  normalizedFeatures: { excerpt: 'renewed-original' },
+                  evidence: { excerpt: 'renewed-original' },
+                },
+              });
+              return selected;
+            },
+          },
+        },
+      });
+      const pruning = new GlobalSpammerIntelligenceService(concurrentWriter as never);
+      try {
+        await expect(pruning.pruneExpiredRawEvidence({ now })).resolves.toMatchObject({
+          scanned: 2,
+          pruned: 1,
+        });
+        expect(
+          await db.spammerObservation.findUnique({ where: { id: 'stable-evidence' } }),
+        ).toMatchObject({
+          evidence: { rawEvidencePruned: true },
+          privacyClass: 'MINIMIZED',
+        });
+        expect(
+          await db.spammerObservation.findUnique({ where: { id: 'renewed-evidence' } }),
+        ).toMatchObject({
+          evidence: { excerpt: 'renewed-original' },
+          rawEvidenceExpiresAt: renewedExpiry,
+        });
+      } finally {
+        pruning.onModuleDestroy();
+      }
     });
 
     it('preserves the exact default dry-run count, including legacy null expiry', async () => {

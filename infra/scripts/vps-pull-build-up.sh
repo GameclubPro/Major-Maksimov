@@ -575,6 +575,33 @@ verify_giveaway_writer_rollout() {
   GIVEAWAY_FIRST_WRITER=1
 }
 
+verify_spammer_kick_writer_rollout() {
+  local target_sha="$1" target_mode baseline_sha baseline_mode image_ref image_id retained_id
+  target_mode="$(node infra/scripts/assert-spammer-kick-source.mjs "$target_sha")" || return 1
+  [[ "$target_mode" == writer ]] || return 0
+
+  baseline_sha="$(release_field api-shared sourceSha)" || return 1
+  baseline_mode="$(node infra/scripts/assert-spammer-kick-source.mjs "$baseline_sha")" || return 1
+  [[ "$baseline_mode" == writer ]] && return 0
+  if [[ "$baseline_mode" != reader ]]; then
+    echo "Deploy the compatible spammer removal reader before activating its writer." >&2
+    return 1
+  fi
+
+  image_ref="$(release_field api-shared imageRef)" || return 1
+  image_id="$(release_field api-shared imageId)" || return 1
+  if [[ "$image_ref" != "maxim-api:$baseline_sha" || ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    ! retained_id="$(docker image inspect --format '{{.Id}}' "$image_ref")" || [[ "$retained_id" != "$image_id" ]]; then
+    echo "Spammer removal writer requires its verified compatible rollback image." >&2
+    return 1
+  fi
+  # FLAG: During forward rollout, verify the accepted reader is still running before replacing it.
+  if [[ -z "$RECOVERY_BASE_MANIFEST" ]] && ! component_manifest_matches_runtime api-shared; then
+    echo "Running API roles do not match the compatible spammer removal reader." >&2
+    return 1
+  fi
+}
+
 quiesce_giveaway_writer_transition() {
   [[ "$GIVEAWAY_FIRST_WRITER" == 1 ]] || return 0
   # FLAG: Moderation is already stopped. HTTP and the action timer also own giveaway mutations.
@@ -1799,6 +1826,7 @@ fi
 GIVEAWAY_FIRST_WRITER=0
 if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   verify_giveaway_writer_rollout "$(git rev-parse --verify HEAD)" || exit 1
+  verify_spammer_kick_writer_rollout "$(git rev-parse --verify HEAD)" || exit 1
 fi
 
 TARGET_SHA="$(git rev-parse HEAD)"

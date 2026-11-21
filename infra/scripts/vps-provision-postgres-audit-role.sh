@@ -50,6 +50,7 @@ local Docker-socket access under the production pg_hba rules, with:
     IDs and admitted schedule metadata stay inside SQL, with no bot/error grants
   - 28 optional held-receipt scalar metadata columns; identities and seal bindings
     are join/check-only, with no payload, snapshot, attestation or effect authority
+  - seven read-only spammer-retirement projections in a private audit schema; scalar flags and private paging keys only
   - thirteen optional Karavan inventory projection columns; chat IDs/titles only in the private report, no actor IDs or raw audit payloads
   - twelve optional exact-group moderation settings/roster metadata columns;
     no user IDs, configured words/domains, message content or permissions in output
@@ -175,6 +176,125 @@ BEGIN
   END LOOP;
 END
 $revoke_audit_columns$;
+
+-- Infrastructure-owned projections for the fixed read-only history inventory.
+SET LOCAL search_path = pg_catalog, public, pg_temp;
+CREATE SCHEMA IF NOT EXISTS maxim_spammer_audit;
+DO $schema_guard$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspname='maxim_spammer_audit'
+    AND n.nspowner=(SELECT oid FROM pg_roles WHERE rolname=current_user)
+    AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(n.nspacl,acldefault('n',n.nspowner))) acl
+      WHERE acl.grantee<>n.nspowner AND NOT (acl.grantee='maxim_audit'::regrole AND acl.privilege_type='USAGE'))) THEN
+    RAISE EXCEPTION 'Unexpected spammer audit schema permissions';
+  END IF;
+END $schema_guard$;
+GRANT USAGE ON SCHEMA maxim_spammer_audit TO maxim_audit;
+CREATE OR REPLACE VIEW maxim_spammer_audit.keys_registry WITH(security_invoker=false) AS
+      SELECT user_id AS key1,''::text AS key2 FROM public.global_spammers;
+      REVOKE ALL ON maxim_spammer_audit.keys_registry FROM PUBLIC;
+      GRANT SELECT(key1,key2) ON maxim_spammer_audit.keys_registry TO maxim_audit;
+    CREATE OR REPLACE VIEW maxim_spammer_audit.registry WITH(security_barrier=true,security_invoker=false) AS
+      SELECT user_id AS key1,''::text AS key2,CASE WHEN (pg_column_compression(source_breakdown) IS NOT NULL OR pg_column_size(source_breakdown)>32768) THEN 'unmeasured'
+    WHEN jsonb_typeof(source_breakdown) IS DISTINCT FROM 'object' OR source_breakdown='{}'::jsonb THEN 'unknown'
+    WHEN source_breakdown ? 'DEVELOPER_FORCED' THEN CASE WHEN source_breakdown-'DEVELOPER_FORCED'='{}'::jsonb THEN 'retired_only' ELSE 'mixed' END
+    WHEN (source_breakdown - ARRAY['FANOUT_HIGH','FANOUT_REPEAT','COMMERCIAL_AD','COMMERCIAL_CAMPAIGN','REPEATED_LINK','REPEATED_PHONE','GRAPH_DOMAIN','GRAPH_PHONE','GRAPH_TEXT','GRAPH_CAMPAIGN','GRAPH_FANOUT_PATTERN','SANCTION_BAN','MANUAL_BAN','LOCAL_ADMIN_BLOCK','LOCAL_ADMIN_ALLOW','REVIEW_APPROVED']::text[])<>'{}'::jsonb THEN 'unknown' ELSE 'ordinary' END AS provenance,
+        CASE
+    WHEN (pg_column_compression(last_evidence) IS NOT NULL OR pg_column_size(last_evidence)>32768)  THEN NULL
+    ELSE COALESCE(last_evidence ?| ARRAY['text','messageText','excerpt','urls','metadata','actorUserId'],false)
+      OR COALESCE(jsonb_typeof(last_evidence->'evidence')<>'null',false)  END AS raw_copy,COALESCE(expires_at>statement_timestamp(),false) AS active FROM public.global_spammers;
+      REVOKE ALL ON maxim_spammer_audit.registry FROM PUBLIC;
+      GRANT SELECT(key1,key2,provenance,raw_copy,active) ON maxim_spammer_audit.registry TO maxim_audit;
+CREATE OR REPLACE VIEW maxim_spammer_audit.keys_candidates WITH(security_invoker=false) AS
+      SELECT user_id AS key1,''::text AS key2 FROM public.global_spammer_candidates;
+      REVOKE ALL ON maxim_spammer_audit.keys_candidates FROM PUBLIC;
+      GRANT SELECT(key1,key2) ON maxim_spammer_audit.keys_candidates TO maxim_audit;
+    CREATE OR REPLACE VIEW maxim_spammer_audit.candidates WITH(security_barrier=true,security_invoker=false) AS
+      SELECT user_id AS key1,''::text AS key2,CASE WHEN (pg_column_compression(source_breakdown) IS NOT NULL OR pg_column_size(source_breakdown)>32768) THEN 'unmeasured'
+    WHEN jsonb_typeof(source_breakdown) IS DISTINCT FROM 'object' OR source_breakdown='{}'::jsonb THEN 'unknown'
+    WHEN source_breakdown ? 'DEVELOPER_FORCED' THEN CASE WHEN source_breakdown-'DEVELOPER_FORCED'='{}'::jsonb THEN 'retired_only' ELSE 'mixed' END
+    WHEN (source_breakdown - ARRAY['FANOUT_HIGH','FANOUT_REPEAT','COMMERCIAL_AD','COMMERCIAL_CAMPAIGN','REPEATED_LINK','REPEATED_PHONE','GRAPH_DOMAIN','GRAPH_PHONE','GRAPH_TEXT','GRAPH_CAMPAIGN','GRAPH_FANOUT_PATTERN','SANCTION_BAN','MANUAL_BAN','LOCAL_ADMIN_BLOCK','LOCAL_ADMIN_ALLOW','REVIEW_APPROVED']::text[])<>'{}'::jsonb THEN 'unknown' ELSE 'ordinary' END AS provenance,
+        CASE
+    WHEN (pg_column_compression(last_evidence) IS NOT NULL OR pg_column_size(last_evidence)>32768)  THEN NULL
+    ELSE COALESCE(last_evidence ?| ARRAY['text','messageText','excerpt','urls','metadata','actorUserId'],false)
+      OR COALESCE(jsonb_typeof(last_evidence->'evidence')<>'null',false)  END AS raw_copy,NULL::boolean AS active FROM public.global_spammer_candidates;
+      REVOKE ALL ON maxim_spammer_audit.candidates FROM PUBLIC;
+      GRANT SELECT(key1,key2,provenance,raw_copy,active) ON maxim_spammer_audit.candidates TO maxim_audit;
+CREATE OR REPLACE VIEW maxim_spammer_audit.keys_chats WITH(security_invoker=false) AS
+      SELECT candidate_user_id AS key1,chat_id AS key2 FROM public.global_spammer_candidate_chats;
+      REVOKE ALL ON maxim_spammer_audit.keys_chats FROM PUBLIC;
+      GRANT SELECT(key1,key2) ON maxim_spammer_audit.keys_chats TO maxim_audit;
+    CREATE OR REPLACE VIEW maxim_spammer_audit.chats WITH(security_barrier=true,security_invoker=false) AS
+      SELECT candidate_user_id AS key1,chat_id AS key2,NULL::text AS provenance,
+        CASE WHEN last_excerpt IS NOT NULL THEN true
+    WHEN (pg_column_compression(last_evidence) IS NOT NULL OR pg_column_size(last_evidence)>32768)  THEN NULL
+    ELSE COALESCE(last_evidence ?| ARRAY['text','messageText','excerpt','urls','metadata','actorUserId'],false)
+      OR COALESCE(jsonb_typeof(last_evidence->'evidence')<>'null',false)  END AS raw_copy,NULL::boolean AS active FROM public.global_spammer_candidate_chats;
+      REVOKE ALL ON maxim_spammer_audit.chats FROM PUBLIC;
+      GRANT SELECT(key1,key2,provenance,raw_copy,active) ON maxim_spammer_audit.chats TO maxim_audit;
+CREATE OR REPLACE VIEW maxim_spammer_audit.keys_archives WITH(security_invoker=false) AS
+      SELECT id AS key1,''::text AS key2 FROM public.global_spammer_archives;
+      REVOKE ALL ON maxim_spammer_audit.keys_archives FROM PUBLIC;
+      GRANT SELECT(key1,key2) ON maxim_spammer_audit.keys_archives TO maxim_audit;
+    CREATE OR REPLACE VIEW maxim_spammer_audit.archives WITH(security_barrier=true,security_invoker=false) AS
+      SELECT id AS key1,''::text AS key2,CASE WHEN (pg_column_compression(source_breakdown) IS NOT NULL OR pg_column_size(source_breakdown)>32768) THEN 'unmeasured'
+    WHEN jsonb_typeof(source_breakdown) IS DISTINCT FROM 'object' OR source_breakdown='{}'::jsonb THEN 'unknown'
+    WHEN source_breakdown ? 'DEVELOPER_FORCED' THEN CASE WHEN source_breakdown-'DEVELOPER_FORCED'='{}'::jsonb THEN 'retired_only' ELSE 'mixed' END
+    WHEN (source_breakdown - ARRAY['FANOUT_HIGH','FANOUT_REPEAT','COMMERCIAL_AD','COMMERCIAL_CAMPAIGN','REPEATED_LINK','REPEATED_PHONE','GRAPH_DOMAIN','GRAPH_PHONE','GRAPH_TEXT','GRAPH_CAMPAIGN','GRAPH_FANOUT_PATTERN','SANCTION_BAN','MANUAL_BAN','LOCAL_ADMIN_BLOCK','LOCAL_ADMIN_ALLOW','REVIEW_APPROVED']::text[])<>'{}'::jsonb THEN 'unknown' ELSE 'ordinary' END AS provenance,
+        CASE
+    WHEN (pg_column_compression(last_evidence) IS NOT NULL OR pg_column_size(last_evidence)>32768)  THEN NULL
+    ELSE COALESCE(last_evidence ?| ARRAY['text','messageText','excerpt','urls','metadata','actorUserId'],false)
+      OR COALESCE(jsonb_typeof(last_evidence->'evidence')<>'null',false)  END AS raw_copy,NULL::boolean AS active FROM public.global_spammer_archives;
+      REVOKE ALL ON maxim_spammer_audit.archives FROM PUBLIC;
+      GRANT SELECT(key1,key2,provenance,raw_copy,active) ON maxim_spammer_audit.archives TO maxim_audit;
+CREATE OR REPLACE VIEW maxim_spammer_audit.keys_observations WITH(security_invoker=false) AS
+      SELECT id AS key1,''::text AS key2 FROM public.spammer_observations;
+      REVOKE ALL ON maxim_spammer_audit.keys_observations FROM PUBLIC;
+      GRANT SELECT(key1,key2) ON maxim_spammer_audit.keys_observations TO maxim_audit;
+    CREATE OR REPLACE VIEW maxim_spammer_audit.observations WITH(security_barrier=true,security_invoker=false) AS
+      SELECT id AS key1,''::text AS key2,CASE WHEN source='DEVELOPER_FORCED' THEN 'retired_only' WHEN source IN ('FANOUT_HIGH','FANOUT_REPEAT','COMMERCIAL_AD','COMMERCIAL_CAMPAIGN','REPEATED_LINK','REPEATED_PHONE','GRAPH_DOMAIN','GRAPH_PHONE','GRAPH_TEXT','GRAPH_CAMPAIGN','GRAPH_FANOUT_PATTERN','SANCTION_BAN','MANUAL_BAN','LOCAL_ADMIN_BLOCK','LOCAL_ADMIN_ALLOW','REVIEW_APPROVED') THEN 'ordinary' ELSE 'unknown' END AS provenance,
+        CASE
+    WHEN (pg_column_compression(evidence) IS NOT NULL OR pg_column_size(evidence)>32768) OR (pg_column_compression(normalized_features) IS NOT NULL OR pg_column_size(normalized_features)>32768) THEN NULL
+    ELSE COALESCE(evidence ?| ARRAY['text','messageText','excerpt','urls','metadata','actorUserId'],false)
+      OR COALESCE(jsonb_typeof(evidence->'evidence')<>'null',false) OR COALESCE(normalized_features ? 'urls',false) END AS raw_copy,NULL::boolean AS active FROM public.spammer_observations;
+      REVOKE ALL ON maxim_spammer_audit.observations FROM PUBLIC;
+      GRANT SELECT(key1,key2,provenance,raw_copy,active) ON maxim_spammer_audit.observations TO maxim_audit;
+CREATE OR REPLACE VIEW maxim_spammer_audit.keys_profiles WITH(security_invoker=false) AS
+      SELECT user_id AS key1,''::text AS key2 FROM public.spammer_user_runtime_profiles;
+      REVOKE ALL ON maxim_spammer_audit.keys_profiles FROM PUBLIC;
+      GRANT SELECT(key1,key2) ON maxim_spammer_audit.keys_profiles TO maxim_audit;
+    CREATE OR REPLACE VIEW maxim_spammer_audit.profiles WITH(security_barrier=true,security_invoker=false) AS
+      SELECT user_id AS key1,''::text AS key2,CASE WHEN (pg_column_compression(source_breakdown) IS NOT NULL OR pg_column_size(source_breakdown)>32768) THEN 'unmeasured'
+    WHEN jsonb_typeof(source_breakdown) IS DISTINCT FROM 'object' OR source_breakdown='{}'::jsonb THEN 'unknown'
+    WHEN source_breakdown ? 'DEVELOPER_FORCED' THEN CASE WHEN source_breakdown-'DEVELOPER_FORCED'='{}'::jsonb THEN 'retired_only' ELSE 'mixed' END
+    WHEN (source_breakdown - ARRAY['FANOUT_HIGH','FANOUT_REPEAT','COMMERCIAL_AD','COMMERCIAL_CAMPAIGN','REPEATED_LINK','REPEATED_PHONE','GRAPH_DOMAIN','GRAPH_PHONE','GRAPH_TEXT','GRAPH_CAMPAIGN','GRAPH_FANOUT_PATTERN','SANCTION_BAN','MANUAL_BAN','LOCAL_ADMIN_BLOCK','LOCAL_ADMIN_ALLOW','REVIEW_APPROVED']::text[])<>'{}'::jsonb THEN 'unknown' ELSE 'ordinary' END AS provenance,
+        NULL::boolean AS raw_copy,NULL::boolean AS active FROM public.spammer_user_runtime_profiles;
+      REVOKE ALL ON maxim_spammer_audit.profiles FROM PUBLIC;
+      GRANT SELECT(key1,key2,provenance,raw_copy,active) ON maxim_spammer_audit.profiles TO maxim_audit;
+CREATE OR REPLACE VIEW maxim_spammer_audit.keys_campaigns WITH(security_invoker=false) AS
+      SELECT id AS key1,''::text AS key2 FROM public.spammer_campaign_clusters;
+      REVOKE ALL ON maxim_spammer_audit.keys_campaigns FROM PUBLIC;
+      GRANT SELECT(key1,key2) ON maxim_spammer_audit.keys_campaigns TO maxim_audit;
+    CREATE OR REPLACE VIEW maxim_spammer_audit.campaigns WITH(security_barrier=true,security_invoker=false) AS
+      SELECT id AS key1,''::text AS key2,NULL::text AS provenance,
+        CASE WHEN signal_type<>'URL' THEN false WHEN (pg_column_compression(signal_value_preview) IS NOT NULL OR pg_column_size(signal_value_preview)>32768) THEN NULL ELSE COALESCE(strpos(signal_value_preview,'/')>0,false) END AS raw_copy,NULL::boolean AS active FROM public.spammer_campaign_clusters;
+      REVOKE ALL ON maxim_spammer_audit.campaigns FROM PUBLIC;
+      GRANT SELECT(key1,key2,provenance,raw_copy,active) ON maxim_spammer_audit.campaigns TO maxim_audit;
+
+DO $verify_spammer_projection$ BEGIN
+  IF NOT (WITH v AS (SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='maxim_spammer_audit'),
+   ns AS (SELECT * FROM pg_namespace WHERE nspname='maxim_spammer_audit')
+   SELECT false OR (
+     EXISTS(SELECT 1 FROM ns WHERE nspowner=(SELECT oid FROM pg_roles WHERE rolname='maxim') AND has_schema_privilege('maxim_audit',oid,'USAGE') AND NOT has_schema_privilege('maxim_audit',oid,'CREATE')
+        AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(nspacl,acldefault('n',nspowner))) acl WHERE acl.grantee<>nspowner AND NOT(acl.grantee='maxim_audit'::regrole AND acl.privilege_type='USAGE')))
+     AND (SELECT count(*) FROM v)=14
+     AND NOT EXISTS(SELECT 1 FROM v WHERE relname NOT IN ('registry','candidates','chats','archives','observations','profiles','campaigns','keys_registry','keys_candidates','keys_chats','keys_archives','keys_observations','keys_profiles','keys_campaigns') OR relkind<>'v' OR relowner<>(SELECT nspowner FROM ns)
+       OR NOT COALESCE(reloptions @> ARRAY['security_invoker=false'],false) OR (relname IN ('registry','candidates','chats','archives','observations','profiles','campaigns') AND NOT COALESCE(reloptions @> ARRAY['security_barrier=true'],false))
+       OR has_table_privilege('maxim_audit',oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+     AND NOT EXISTS(SELECT 1 FROM v JOIN pg_attribute a ON a.attrelid=v.oid WHERE a.attnum>0 AND NOT a.attisdropped AND
+       (a.attname NOT IN ('key1','key2','provenance','raw_copy','active') OR (v.relname IN ('keys_registry','keys_candidates','keys_chats','keys_archives','keys_observations','keys_profiles','keys_campaigns') AND a.attname NOT IN ('key1','key2')) OR NOT has_column_privilege('maxim_audit',v.oid,a.attnum,'SELECT') OR has_column_privilege('maxim_audit',v.oid,a.attnum,'INSERT,UPDATE,REFERENCES')))
+     AND (SELECT count(*) FROM v JOIN pg_attribute a ON a.attrelid=v.oid WHERE a.attnum>0 AND NOT a.attisdropped)=49
+   )) THEN RAISE EXCEPTION 'Unexpected spammer retirement projection privileges'; END IF;
+END $verify_spammer_projection$;
 
 DO $karavan_candidates$ BEGIN
     IF to_regclass('public.karavan_marketplace_candidate_settings') IS NOT NULL AND to_regclass('public.karavan_marketplace_candidate_events') IS NOT NULL THEN
@@ -1236,6 +1356,7 @@ BEGIN
               'moderation_delete_intents',
               'moderation_delete_intent_reasons'
             )
+              OR (namespace.nspname='maxim_spammer_audit' AND relation.relkind='v' AND relation.relname IN ('registry','candidates','chats','archives','observations','profiles','campaigns','keys_registry','keys_candidates','keys_chats','keys_archives','keys_observations','keys_profiles','keys_campaigns'))
           )
           AND (
             has_table_privilege('maxim_audit', relation.oid, 'SELECT')

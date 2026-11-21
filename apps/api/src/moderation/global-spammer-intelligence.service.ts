@@ -2234,7 +2234,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       const updates = chunk.map((row) => this.buildRawEvidencePruneUpdate(row, now));
       try {
         const result = await this.prisma.$transaction(updates);
-        pruned += result.length;
+        pruned += result.reduce((count, result) => count + result.count, 0);
         continue;
       } catch (error: unknown) {
         this.logger.warn(
@@ -2247,8 +2247,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       }
       for (const row of chunk) {
         try {
-          await this.buildRawEvidencePruneUpdate(row, now);
-          pruned += 1;
+          pruned += (await this.buildRawEvidencePruneUpdate(row, now)).count;
         } catch (rowError: unknown) {
           failedIds.push(row.id);
           this.logger.warn(
@@ -2279,14 +2278,18 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
   private buildRawEvidencePruneUpdate(
     row: {
       id: string;
-      evidence: Prisma.JsonValue | null;
+      updatedAt: Date;
       normalizedFeatures: Prisma.JsonValue | null;
     },
     now: Date,
   ) {
-    return this.prisma.spammerObservation.update({
+    // FLAG: Scrub only the version inspected in the expired-evidence page.
+    return this.prisma.spammerObservation.updateMany({
       where: {
         id: row.id,
+        updatedAt: row.updatedAt,
+        rawEvidenceExpiresAt: { lte: now },
+        privacyClass: { not: 'MINIMIZED' },
       },
       data: {
         evidence: this.buildMinimizedEvidence(row.normalizedFeatures, now),

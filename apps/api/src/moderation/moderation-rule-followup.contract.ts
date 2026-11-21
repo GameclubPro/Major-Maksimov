@@ -26,6 +26,11 @@ export type ModerationRuleFollowupPlan = {
   noticeKey: string;
 };
 export type ModerationRuleFollowupExecutor = {
+  executeSpammerKickFollowup(
+    row: ModerationRuleFollowup,
+    leaseToken: string,
+    receiptOnly: boolean,
+  ): ReturnType<typeof import('./spammer-kick-followup').executeSpammerKickFollowup>;
   executeRuleFollowup(
     row: ModerationRuleFollowup,
     plan: ModerationRuleFollowupPlan,

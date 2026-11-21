@@ -464,7 +464,14 @@ export class ModerationStateDeleteGuardService {
     botId?: string;
     localBlock: boolean;
     beforeFinalAuthority?: () => Promise<void>;
+    assertFinalOwnership?: () => Promise<void>;
+    sourceDeadlineAtMs?: number;
   }): Promise<void> {
+    if (
+      params.sourceDeadlineAtMs !== undefined &&
+      (!Number.isSafeInteger(params.sourceDeadlineAtMs) || Date.now() >= params.sourceDeadlineAtMs)
+    )
+      this.reject();
     if (
       (await this.legacyHolds?.isMessageHeld(params.chatId, params.messageId)) ||
       (await this.legacyHolds?.isMemberHeld(params.chatId, params.userId)) ||
@@ -522,7 +529,12 @@ export class ModerationStateDeleteGuardService {
     )
       this.reject();
     const finalDeadline = await this.readSpammerMemberDeadline(params, final.chat.admins);
-    if (Date.now() >= Math.min(deadline, finalDeadline)) this.reject();
+    await params.assertFinalOwnership?.();
+    if (
+      Date.now() >=
+      Math.min(deadline, finalDeadline, params.sourceDeadlineAtMs ?? Number.POSITIVE_INFINITY)
+    )
+      this.reject();
   }
 
   private async readSpammerMemberDeadline(

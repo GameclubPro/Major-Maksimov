@@ -271,7 +271,7 @@ export function createBotAccountKickOptions(
 export function createSpammerKickOptions(
   guard: StateGuard | undefined,
   readSelectedBotId: ReadBotId,
-  params: Identity & { localBlock: boolean },
+  params: Identity & { localBlock: boolean; sourceDeadlineAtMs?: number },
 ): Omit<MaxActionDispatchOptions, 'immediate'> | undefined {
   if (!guard) return undefined;
   return {
