@@ -1145,7 +1145,8 @@ for (const [name, change, code] of [
     'unsafe sibling directory',
     async (h) => {
       const path = join(h.root, 'other-directory');
-      await mkdir(path, { mode: 0o755 });
+      await mkdir(path, { mode: 0o700 });
+      await chmod(path, 0o755);
     },
     'unsafe_sibling_private_directory',
   ],

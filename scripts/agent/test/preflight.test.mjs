@@ -27,6 +27,7 @@ test('fast preflight checks current source without building dist or changing gen
 test('file growth fails preflight before generated artifacts or other checks are needed', (t) => {
   const fixture = mkdtempSync(resolve(tmpdir(), 'maxim-preflight-ceiling-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  writeFileSync(resolve(fixture, '.nvmrc'), process.versions.node.split('.')[0]);
   findRefactorFileSizeViolations(fixture, (path) => {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, '');
@@ -42,4 +43,12 @@ test('file growth fails preflight before generated artifacts or other checks are
     /moderation\.service\.legacy\.ts has 18725 lines, over the 18724 refactor guard/u,
   );
   assert.deepEqual(messages, []);
+});
+
+test('a mismatched Node version stops verification before visiting source', (t) => {
+  const fixture = mkdtempSync(resolve(tmpdir(), 'maxim-preflight-node-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const wrongVersion = Number(process.versions.node.split('.')[0]) + 1;
+  writeFileSync(resolve(fixture, '.nvmrc'), String(wrongVersion));
+  assert.throws(() => runPreflight(fixture), new RegExp(`requires Node ${wrongVersion}`, 'u'));
 });

@@ -19,6 +19,10 @@ the runner labels; the moving `ubuntu-latest` alias is not the CI platform contr
    repository commit helper. The helper runs the final aggregate once.
 2. Merge the PR after its required checks pass. For a runtime release, require successful
    `Required` and `Analyze JavaScript and TypeScript` on the exact selected main SHA.
+   Select both run IDs for that commit and follow them together with
+   `node scripts/agent/watch-ci.mjs --sha <SHA> --ci-run <CI_ID> --codeql-run <CODEQL_ID>`.
+   Use `--review` for a PR. The watcher reports state changes, checks the selected run attempts
+   and stops on failure or its deadline.
 3. From a clean release checkout with configured VPS access, run:
 
    ```bash
