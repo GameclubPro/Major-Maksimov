@@ -230,12 +230,17 @@ describeStores(
       expect(analyzed.kind).toBe('complete');
       if (analyzed.kind !== 'complete')
         throw new Error('Expected completed synthetic native analysis');
+      const expectCrop = failure !== undefined && kind !== 'legacy-latin';
       expect(native.recognize.mock.calls.map((call) => [call[1]?.passLabel, call[1]?.psm])).toEqual(
-        [
-          ['primary', 11],
-          ['confirmation', 6],
-        ],
+        [['primary', 11], ['confirmation', 6], ...(expectCrop ? [['confirmation', 6]] : [])],
       );
+      expect(
+        preprocessor.prepare.mock.calls.map(([, pass, options]) => [pass, options?.crop]),
+      ).toEqual([
+        ['primary', undefined],
+        ['confirmation', undefined],
+        ...(expectCrop ? [['primary', { left: 0, top: 0, width: 22, height: 22 }]] : []),
+      ]);
       expect(downloader.download).toHaveBeenCalledTimes(1);
       const decision = analyzed.imageTextStopListDecision;
       const persist = async () => {
