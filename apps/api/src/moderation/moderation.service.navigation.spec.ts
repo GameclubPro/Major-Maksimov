@@ -4138,19 +4138,6 @@ describe('ModerationService', () => {
         },
       },
       {
-        name: 'developer-forced global spammer',
-        configure: (service: ModerationService) => {
-          jest
-            .spyOn(service as any, 'isDeveloperForcedGlobalSpammerCachedWithHotPathBudget')
-            .mockResolvedValue(true);
-          jest.spyOn(service as any, 'resolveSenderChatAdminCheck').mockResolvedValue({
-            isAdmin: false,
-            source: 'remote',
-          });
-          jest.spyOn(service as any, 'deleteAndKickDetectedGlobalSpammer').mockResolvedValue(true);
-        },
-      },
-      {
         name: 'manual group close',
         configure: (service: ModerationService) => {
           jest
@@ -4167,9 +4154,6 @@ describe('ModerationService', () => {
       {
         name: 'local blocklist',
         configure: (service: ModerationService) => {
-          jest
-            .spyOn(service as any, 'isDeveloperForcedGlobalSpammerCachedWithHotPathBudget')
-            .mockResolvedValue(false);
           jest
             .spyOn(service as any, 'resolveGlobalSpammerAdminDecisionsWithHotPathBudget')
             .mockResolvedValue(new Map([['user-1', 'BLOCK']]));
@@ -4189,9 +4173,6 @@ describe('ModerationService', () => {
       {
         name: 'known global spammer',
         configure: (service: ModerationService) => {
-          jest
-            .spyOn(service as any, 'isDeveloperForcedGlobalSpammerCachedWithHotPathBudget')
-            .mockResolvedValue(false);
           jest
             .spyOn(service as any, 'trackAndRegisterGlobalSpammerWithHotPathBudget')
             .mockResolvedValue({ handled: false, skipKnownSpammerCheck: false });
@@ -4227,11 +4208,7 @@ describe('ModerationService', () => {
                   nightModeTimezone: 'UTC',
                 }
               : {}),
-            ...([
-              'developer-forced global spammer',
-              'local blocklist',
-              'known global spammer',
-            ].includes(name)
+            ...(['local blocklist', 'known global spammer'].includes(name)
               ? { deleteSpammersEnabled: true }
               : {}),
           },
@@ -4245,29 +4222,6 @@ describe('ModerationService', () => {
         expect(harness.ruleEngine.detect).not.toHaveBeenCalled();
       },
     );
-
-    it('keeps a developer-forced admin photo out of the duplicate queue', async () => {
-      const harness = createHarness({ settingsOverrides: { deleteSpammersEnabled: true } });
-      jest
-        .spyOn(harness.service as any, 'isDeveloperForcedGlobalSpammerCachedWithHotPathBudget')
-        .mockResolvedValue(true);
-      jest.spyOn(harness.service as any, 'resolveSenderChatAdminCheck').mockResolvedValue({
-        isAdmin: true,
-        source: 'remote',
-      });
-      const deleteSpammer = jest
-        .spyOn(harness.service as any, 'deleteAndKickDetectedGlobalSpammer')
-        .mockResolvedValue(true);
-
-      await harness.service.handleUpdate(
-        createPhotoAttachmentUpdate(99),
-        undefined,
-        'webhook-photo-99',
-      );
-
-      expect(deleteSpammer).toHaveBeenCalled();
-      expect(harness.photoDuplicateEnqueueService.enqueue).not.toHaveBeenCalled();
-    });
 
     it('only lowers the duplicate action latch for photo messages from chat admins', async () => {
       const harness = createHarness({ adminUserIds: ['user-1'] });
@@ -4461,46 +4415,6 @@ describe('ModerationService', () => {
           commercialScanRequested: false,
           imageTextScanRequested: true,
         });
-      });
-
-      it('lowers the OCR latch for a developer-forced spammer when duplicate photos are disabled', async () => {
-        const harness = createHarness({
-          settingsOverrides: {
-            antiDuplicateEnabled: false,
-            duplicatePhotoEnabled: false,
-            commercialAdsFilterEnabled: true,
-            messageLimitsImageTextScanEnabled: true,
-            messageLimitsBlockedWords: ['казино'],
-            deleteSpammersEnabled: true,
-          },
-        });
-        jest
-          .spyOn(harness.service as any, 'isDeveloperForcedGlobalSpammerCachedWithHotPathBudget')
-          .mockResolvedValue(true);
-        jest.spyOn(harness.service as any, 'resolveSenderChatAdminCheck').mockResolvedValue({
-          isAdmin: false,
-          source: 'remote',
-        });
-        jest
-          .spyOn(harness.service as any, 'deleteAndKickDetectedGlobalSpammer')
-          .mockResolvedValue(true);
-        const update = createPhotoAttachmentUpdate(110);
-
-        await harness.service.handleUpdate(update, undefined, 'webhook-photo-110');
-
-        expect(harness.photoDuplicateEnqueueService.enqueue).not.toHaveBeenCalled();
-        expect(harness.commercialOcrEnqueueService.enqueue).toHaveBeenCalledWith({
-          webhookEventId: 'webhook-photo-110',
-          chatId: 'chat-1',
-          messageId: 'msg-photo-110',
-          sourceCreatedAt: update.message!.createdAt,
-          eventTimestamp: update.message!.createdAt,
-          imageCount: 1,
-          actionEligible: false,
-          commercialScanRequested: false,
-          imageTextScanRequested: true,
-        });
-        expect(harness.ruleEngine.detect).not.toHaveBeenCalled();
       });
 
       it.each([

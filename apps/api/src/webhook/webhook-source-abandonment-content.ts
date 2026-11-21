@@ -1,3 +1,4 @@
+import { isRetiredSuperBanCommandText } from '@maxim/contracts';
 import {
   parseAdminForwardedModerationCommand,
   type AdminForwardedCommandSettings,
@@ -114,6 +115,7 @@ export function inspectSourceAbandonmentReplyText(
       if (
         /^[/$]/u.test(text.trim()) ||
         /^старт$/iu.test(text.trim()) ||
+        isRetiredSuperBanCommandText(text) ||
         parseAdminForwardedModerationCommand(text) ||
         (settings && parseAdminForwardedModerationCommand(text, settings))
       )

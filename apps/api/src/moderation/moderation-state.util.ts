@@ -8,6 +8,7 @@ export type CachedActiveMuteState = {
   expiresAt: string | null;
   durationHours: number | null;
   permanent?: boolean;
+  ordinaryManualMuteVerified?: true;
   ruleCode?: string | null;
 };
 

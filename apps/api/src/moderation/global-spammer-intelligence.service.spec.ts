@@ -231,7 +231,7 @@ function createPrismaMock() {
           row.evidenceHash === key.evidenceHash,
       );
       const next = {
-        id: observations[index]?.id ?? `obs-${observations.length + 1}`,
+        id: observations[index]?.id ?? create.id ?? `obs-${observations.length + 1}`,
         ...(index >= 0 ? observations[index] : {}),
         ...(index >= 0 ? update : create),
         userId: key.userId,
@@ -297,6 +297,13 @@ function createPrismaMock() {
     updateMany: jest.fn(async ({ where, data }: any) => {
       let count = 0;
       for (const row of observations) {
+        if (typeof where.id === 'string') {
+          if (row.id === where.id && row.projectionDueAt != null) {
+            Object.assign(row, data);
+            count++;
+          }
+          continue;
+        }
         if (
           row.userId === where.userId &&
           row.expiresAt > where.expiresAt.gt &&
@@ -690,9 +697,9 @@ describe('GlobalSpammerIntelligenceService', () => {
         reason: 'REVIEW_APPROVED',
         expiresAt: new Date(Date.now() + 60000),
         suppressedUntil: null,
-        sourceBreakdown: null,
+        sourceBreakdown: { REVIEW_APPROVED: { score: 1 } },
         campaignBreakdown: null,
-        sourceVersion: 2,
+        sourceVersion: 3,
         staleAfter: new Date(Date.now() + 60000),
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -802,51 +809,87 @@ describe('GlobalSpammerIntelligenceService', () => {
     );
   });
 
-  it('promotes developer-forced blacklist entries and overrides local allow settings', async () => {
-    const { prisma } = createPrismaMock();
-    const service = new GlobalSpammerIntelligenceService(prisma as never);
-
-    const result = await service.recordDeveloperForcedGlobalBlacklist({
-      userId: 'user-super-ban',
-      actorUserId: '98315271',
-      chatId: 'chat-1',
-      messageId: 'message-1',
-      userLabel: 'Нарушитель',
+  it.each([
+    { DEVELOPER_FORCED: { score: 1 } },
+    { DEVELOPER_FORCED: { score: 1 }, FANOUT_HIGH: { score: 0.94 } },
+    {},
+  ])('refuses retired or unproven SQL and cached authority', async (sourceBreakdown) => {
+    const { prisma, registry, runtimeProfiles } = createPrismaMock();
+    const service = new GlobalSpammerIntelligenceService(
+      prisma as never,
+      createConfigMock({
+        SPAMMER_PROFILE_CACHE_ENABLED: 'true',
+        SPAMMER_READ_MODEL_ENFORCEMENT_ENABLED: 'true',
+      }),
+    );
+    const expiresAt = new Date(Date.now() + 60_000);
+    registry.set('retired', { userId: 'retired', expiresAt, sourceBreakdown });
+    runtimeProfiles.set('retired', {
+      userId: 'retired',
+      registryStatus: 'ACTIVE_CONFIRMED',
+      sourceVersion: 2,
+      action: 'DELETE_AND_KICK',
+      sourceBreakdown,
+      updatedAt: new Date(),
+      expiresAt,
+      staleAfter: expiresAt,
     });
-
-    expect(result).toEqual(
-      expect.objectContaining({
-        outcome: 'registry',
-        userId: 'user-super-ban',
-      }),
-    );
-    expect(prisma.globalSpammer.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        create: expect.objectContaining({
-          userId: 'user-super-ban',
-          sourceBreakdown: expect.objectContaining({
-            DEVELOPER_FORCED: expect.any(Object),
-          }),
-        }),
-      }),
-    );
-
     await expect(
       service.evaluatePolicy({
-        chatId: 'chat-1',
-        userId: 'user-super-ban',
-        trigger: 'message',
-        deleteSpammersEnabled: false,
-        adminExempt: true,
+        userId: 'retired',
+        chatId: 'chat',
+        trigger: 'test',
+        deleteSpammersEnabled: true,
       }),
-    ).resolves.toEqual(
-      expect.objectContaining({
-        registryStatus: 'ACTIVE_CONFIRMED',
-        action: 'DELETE_AND_KICK',
-        adminExempt: true,
-        deleteSpammersEnabled: false,
-      }),
-    );
+    ).resolves.toMatchObject({ action: 'NONE' });
+    await service.processObservationDenormJob({
+      source: 'DEVELOPER_FORCED',
+      userId: 'retired',
+      createdAt: new Date().toISOString(),
+    });
+    expect(prisma.globalSpammer.upsert).not.toHaveBeenCalled();
+  });
+
+  it('keeps an exact duplicate at its original time and records just one detection', async () => {
+    const { prisma, observations, registry } = createPrismaMock();
+    const service = new GlobalSpammerIntelligenceService(prisma as never);
+    const event = {
+      userId: 'repeat-exact',
+      chatId: 'chat',
+      messageId: 'm',
+      source: 'FANOUT_HIGH' as const,
+      reason: 'FANOUT_EPISODE_CONFIRMED',
+      score: 0.94,
+      forceRegistry: true,
+    };
+    const first = new Date();
+    await service.recordObservation({ ...event, observedAt: first });
+    await service.recordObservation({
+      ...event,
+      observedAt: new Date(first.getTime() + 86400000),
+      evidence: { unrelated: 'new content' },
+    });
+    expect(observations).toHaveLength(1);
+    expect(observations[0].observedAt).toEqual(first);
+    expect(prisma.globalSpammer.upsert).toHaveBeenCalledTimes(1);
+    expect(registry.has(event.userId)).toBe(true);
+  });
+
+  it('keeps a strong fanout and its own graph pattern out of the registry', async () => {
+    const { prisma } = createPrismaMock();
+    const service = new GlobalSpammerIntelligenceService(prisma as never);
+    for (const userId of ['first', 'second']) {
+      const result = await service.recordObservation({
+        userId,
+        chatId: 'chat',
+        source: 'FANOUT_HIGH',
+        reason: 'FANOUT_EPISODE_STRONG',
+        score: 0.82,
+        evidence: { uniqueChats: 6, windowSec: 120 },
+      });
+      expect(result.outcome).not.toBe('registry');
+    }
+    expect(prisma.globalSpammer.upsert).not.toHaveBeenCalled();
   });
 
   it('keeps medium-confidence fanout in review instead of the registry', async () => {
@@ -940,7 +983,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       expect.objectContaining({
         userId: 'user-denorm-1',
         chatId: 'chat-1',
-        observationId: 'obs-1',
+        observationId: expect.any(String),
         source: 'FANOUT_REPEAT',
       }),
       expect.objectContaining({
@@ -955,7 +998,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       expect.objectContaining({
         userId: 'user-denorm-1',
         chatId: 'chat-2',
-        observationId: 'obs-2',
+        observationId: expect.any(String),
         source: 'FANOUT_REPEAT',
       }),
       expect.objectContaining({
@@ -1189,8 +1232,15 @@ describe('GlobalSpammerIntelligenceService', () => {
   });
 
   it('replays fast-path observation denorm jobs idempotently from the ledger', async () => {
-    const { campaignClusters, campaignMembers, candidateChats, candidates, prisma, shadowScores } =
-      createPrismaMock();
+    const {
+      campaignClusters,
+      campaignMembers,
+      candidateChats,
+      candidates,
+      prisma,
+      shadowScores,
+      observations,
+    } = createPrismaMock();
     const service = new GlobalSpammerIntelligenceService(
       prisma as never,
       createConfigMock({
@@ -1230,7 +1280,7 @@ describe('GlobalSpammerIntelligenceService', () => {
     const job = {
       userId: 'User-Denorm-Idempotent',
       chatId: 'chat-1',
-      observationId: 'obs-1',
+      observationId: observations[0].id,
       source: 'FANOUT_REPEAT',
       reason: 'HIGH_FANOUT_5_CHATS_REPEAT',
       userLabel: 'Быстрый Автор',
@@ -1277,7 +1327,7 @@ describe('GlobalSpammerIntelligenceService', () => {
     expect(shadowScores[0]).toEqual(
       expect.objectContaining({
         userId: 'user-denorm-idempotent',
-        observationId: 'obs-1',
+        observationId: observations[0].id,
         campaignBreakdown: expect.any(Object),
       }),
     );
@@ -1357,7 +1407,7 @@ describe('GlobalSpammerIntelligenceService', () => {
           action: 'DELETE_AND_KICK',
           confidenceScore: 0.92,
           reason: 'REVIEW_APPROVED',
-          sourceVersion: 2,
+          sourceVersion: 3,
         }),
       }),
     );
@@ -1615,10 +1665,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       userId: 'feed-user',
       displayName: 'Светлана',
     });
-    expect(profiles.get('mention-user')).toEqual({
-      userId: 'mention-user',
-      displayName: 'Мария',
-    });
+    expect(profiles.has('mention-user')).toBe(false);
     expect(profiles.has('id-like-user')).toBe(false);
     expect(prisma.$queryRaw).toHaveBeenCalledWith(expect.anything());
   });
@@ -1703,7 +1750,7 @@ describe('GlobalSpammerIntelligenceService', () => {
           source: 'COMMERCIAL_AD',
           ttlDays: 10,
           domains: expect.arrayContaining(['bad.example']),
-          urls: expect.arrayContaining(['https://bad.example/order?utm=spam']),
+          urlHashes: expect.arrayContaining([expect.any(String)]),
           phoneHashes: expect.arrayContaining([expect.any(String)]),
           mediaSignatures: expect.arrayContaining([expect.any(String)]),
         }),
@@ -1793,7 +1840,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       expect.objectContaining({
         evidenceHash: 'legacy-hash',
         domains: ['example.com'],
-        urls: ['https://example.com'],
+        urlHashes: [expect.any(String)],
         phoneHashes: ['phone-hash'],
         mediaSignatures: ['media-hash'],
         fanout: {
@@ -1804,7 +1851,7 @@ describe('GlobalSpammerIntelligenceService', () => {
     );
   });
 
-  it('keeps emoji surrogate pairs intact while pruning raw evidence excerpts', async () => {
+  it('removes raw excerpts from both evidence and normalized features after retention', async () => {
     const { observations } = createPrismaMock();
     const service = new GlobalSpammerIntelligenceService({
       spammerObservation: {
@@ -1838,9 +1885,8 @@ describe('GlobalSpammerIntelligenceService', () => {
       }),
     );
 
-    const excerpt = observations[0].evidence.excerpt as string;
-    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u.test(excerpt)).toBe(false);
-    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(excerpt)).toBe(false);
+    expect(observations[0].evidence).not.toHaveProperty('excerpt');
+    expect(JSON.stringify(observations[0])).not.toContain('😎');
   });
 
   it('continues pruning raw evidence rows individually after a batch failure', async () => {
@@ -2184,7 +2230,7 @@ describe('GlobalSpammerIntelligenceService', () => {
 
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
     const reputationSql = prisma.$queryRaw.mock.calls[0]?.[0] as { strings?: readonly string[] };
-    expect(reputationSql.strings?.join(' ')).toContain('UNION ALL');
+    expect(reputationSql.strings?.join(' ')).toContain('COUNT(*) FILTER');
     expect(prisma.spammerObservation.groupBy).not.toHaveBeenCalled();
   });
 
@@ -2403,7 +2449,7 @@ describe('GlobalSpammerIntelligenceService', () => {
     const sourceReputationSql = prisma.$queryRaw.mock.calls[3]?.[0] as {
       strings?: readonly string[];
     };
-    expect(sourceReputationSql.strings?.join(' ')).toContain('UNION ALL');
+    expect(sourceReputationSql.strings?.join(' ')).toContain('COUNT(*) FILTER');
     const topCampaignsSql = prisma.$queryRaw.mock.calls[4]?.[0] as { strings?: readonly string[] };
     expect(topCampaignsSql.strings?.join(' ')).toContain('spammer_campaign_cluster_members');
     expect(topCampaignsSql.strings?.join(' ')).toContain('member.last_seen_at');
@@ -2859,7 +2905,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           decision: 'DELETE_AND_KICK',
-          enforced: true,
+          enforced: false,
           shadow: false,
           policyBand: 'CONFIRMED',
         }),
@@ -2993,126 +3039,42 @@ describe('GlobalSpammerIntelligenceService', () => {
     );
   });
 
-  it('records review feedback and marks shadow scores with human outcomes', async () => {
-    const { candidates, prisma, reviewFeedback, shadowScores } = createPrismaMock();
+  it('stores the local decision and feedback together and ignores an identical repeat', async () => {
+    const { prisma, reviewFeedback } = createPrismaMock();
+    const visit = jest.fn().mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    const updateMany = jest.fn().mockResolvedValue({ count: 0 });
+    const record = jest.fn().mockResolvedValue({ count: 1 });
+    const transaction = {
+      adminGlobalSpammerExemption: { createMany: visit, updateMany },
+      globalSpammerReviewFeedback: prisma.globalSpammerReviewFeedback,
+      spammerObservation: { createMany: record },
+    };
+    prisma.$transaction.mockImplementation(async (operation) => {
+      const run = operation as unknown as (tx: typeof transaction) => Promise<unknown>;
+      return Promise.resolve([await run(transaction)]);
+    });
     const service = new GlobalSpammerIntelligenceService(prisma as never);
-
-    await service.recordObservation({
+    const input = {
+      chatId: 'chat-review',
       userId: 'user-review-feedback',
-      source: 'FANOUT_REPEAT',
-      score: 0.68,
-      reason: 'HIGH_FANOUT_5_CHATS_REPEAT',
-      chatId: 'chat-review',
-      evidence: {
-        uniqueChats: 5,
-        windowSec: 120,
-        excerpt: 'Повторная рассылка https://feedback.example/order сегодня',
-      },
-    });
+      reviewerUserId: 'admin-reviewer',
+      action: 'SUPPRESS' as const,
+      reason: 'false positive from local context',
+    };
 
-    await expect(
-      service.reviewCandidate({
-        chatId: 'chat-review',
-        userId: 'user-review-feedback',
-        reviewerUserId: 'admin-reviewer',
-        action: 'SUPPRESS',
-        reason: 'false positive from local context',
-      }),
-    ).resolves.toEqual(
-      expect.objectContaining({
-        status: 'SUPPRESSED',
-      }),
-    );
+    await expect(service.reviewCandidate(input)).resolves.toMatchObject({ status: 'SUPPRESSED' });
+    await expect(service.reviewCandidate(input)).resolves.toMatchObject({ status: 'SUPPRESSED' });
 
     expect(reviewFeedback).toEqual([
       expect.objectContaining({
-        userId: 'user-review-feedback',
+        chatId: 'chat-review',
         reviewerUserId: 'admin-reviewer',
         action: 'SUPPRESS',
-        candidateStatusBefore: 'PENDING',
-        confidenceScoreBefore: expect.any(Number),
-        campaignBreakdown: expect.any(Object),
       }),
     ]);
-    expect(candidates.get('user-review-feedback')).toEqual(
-      expect.objectContaining({
-        status: 'SUPPRESSED',
-        falsePositive: true,
-        reviewReason: 'false positive from local context',
-      }),
-    );
-    expect(shadowScores).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          humanReviewOutcome: 'SUPPRESS',
-          reviewedByUserId: 'admin-reviewer',
-        }),
-      ]),
-    );
-    expect(prisma.globalSpammerShadowScore.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          humanReviewOutcome: 'SUPPRESS',
-        }),
-      }),
-    );
-  });
-
-  it('treats candidate review as stale-safe when the candidate disappears before update', async () => {
-    const { candidates, prisma, reviewFeedback, localAdminDecisions } = createPrismaMock();
-    const service = new GlobalSpammerIntelligenceService(prisma as never);
-
-    await service.recordObservation({
-      userId: 'user-review-stale',
-      source: 'FANOUT_REPEAT',
-      score: 0.68,
-      reason: 'HIGH_FANOUT_5_CHATS_REPEAT',
-      chatId: 'chat-review',
-      evidence: { uniqueChats: 5 },
-    });
-    prisma.globalSpammerCandidate.updateMany.mockImplementationOnce(async () => {
-      candidates.delete('user-review-stale');
-      return { count: 0 };
-    });
-
-    await expect(
-      service.reviewCandidate({
-        chatId: 'chat-review',
-        userId: 'user-review-stale',
-        reviewerUserId: 'admin-reviewer',
-        action: 'APPROVE',
-        reason: 'confirmed by admin',
-      }),
-    ).resolves.toEqual({
-      ok: true,
-      status: 'APPROVED',
-      userId: 'user-review-stale',
-    });
-
-    expect(reviewFeedback).toEqual([
-      expect.objectContaining({
-        userId: 'user-review-stale',
-        reviewerUserId: 'admin-reviewer',
-        action: 'APPROVE',
-        candidateStatusBefore: 'PENDING',
-      }),
-    ]);
-    expect(localAdminDecisions).toEqual([
-      expect.objectContaining({
-        sourceChatId: 'chat-review',
-        userId: 'user-review-stale',
-        decision: 'BLOCK',
-      }),
-    ]);
-    expect(prisma.globalSpammerCandidate.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { userId: 'user-review-stale' },
-        data: expect.objectContaining({
-          status: 'APPROVED',
-          falsePositive: false,
-        }),
-      }),
-    );
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(prisma.globalSpammerCandidate.updateMany).not.toHaveBeenCalled();
+    expect(prisma.globalSpammerShadowScore.updateMany).not.toHaveBeenCalled();
   });
 
   it('keeps suppressed and expired users out of enforcement', async () => {
@@ -3182,7 +3144,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       suppressedUntil: null,
       sourceBreakdown: { REVIEW_APPROVED: { score: 1 } },
       campaignBreakdown: { cluster1: { scoreContribution: 0.12 } },
-      sourceVersion: 2,
+      sourceVersion: 3,
       staleAfter: new Date(Date.now() + 60_000),
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -3245,7 +3207,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       suppressedUntil: null,
       sourceBreakdown: {},
       campaignBreakdown: null,
-      sourceVersion: 2,
+      sourceVersion: 3,
       staleAfter: new Date(Date.now() - 60_000),
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -3298,7 +3260,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       suppressedUntil: null,
       sourceBreakdown: { FANOUT_HIGH: { score: 0.99 } },
       campaignBreakdown: null,
-      sourceVersion: 2,
+      sourceVersion: 3,
       staleAfter: new Date(Date.now() + 60_000),
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -3383,7 +3345,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       suppressedUntil: null,
       sourceBreakdown,
       campaignBreakdown: null,
-      sourceVersion: 2,
+      sourceVersion: 3,
       staleAfter: expiresAt,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -3460,7 +3422,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       suppressedUntil: null,
       sourceBreakdown,
       campaignBreakdown: null,
-      sourceVersion: 2,
+      sourceVersion: 3,
       staleAfter: expiresAt,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -3535,7 +3497,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       suppressedUntil: null,
       sourceBreakdown: { FANOUT_HIGH: { score: 0.99 } },
       campaignBreakdown: null,
-      sourceVersion: 2,
+      sourceVersion: 3,
       staleAfter: new Date(Date.now() + 60_000),
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -3601,7 +3563,7 @@ describe('GlobalSpammerIntelligenceService', () => {
           action: 'DELETE_AND_KICK',
           confidenceScore: 0.93,
           reason: 'REVIEW_APPROVED',
-          sourceVersion: 2,
+          sourceVersion: 3,
         }),
       }),
     );

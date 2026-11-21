@@ -87,24 +87,25 @@ describe.each([
     await expect(h.internal[handler](message)).resolves.toBe(false);
 
     expect(h.execute).toHaveBeenCalledTimes(1);
-    expect(h.kick).toHaveBeenCalledTimes(claimed ? 1 : 0);
+    expect(h.claim).not.toHaveBeenCalled();
+    expect(h.kick).not.toHaveBeenCalled();
   });
 
-  it('continues independent moderation after an execution error, even if kick succeeds', async () => {
+  it('continues independent moderation after an execution error without excluding the author', async () => {
     const h = createHarness();
     h.execute.mockRejectedValue(new Error('MAX delete unavailable'));
 
     await expect(h.internal[handler](message)).resolves.toBe(false);
 
-    expect(h.kick).toHaveBeenCalledTimes(1);
+    expect(h.kick).not.toHaveBeenCalled();
   });
 
   it('accepts durable pending deletion without claiming remote removal', async () => {
     const h = createHarness();
     h.execute.mockResolvedValue({ accepted: true, gone: false, deleted: false });
-    h.kick.mockResolvedValue(false);
-
     await expect(h.internal[handler](message)).resolves.toBe(true);
+    expect(h.claim).not.toHaveBeenCalled();
+    expect(h.kick).not.toHaveBeenCalled();
   });
 
   it('propagates intent persistence failure before any MAX action or sanction claim', async () => {
@@ -223,7 +224,7 @@ describe('spammer deletion in the message pipeline', () => {
   }
 
   it.each(['known', 'local'])(
-    'still checks links after a %s-spammer kick without deletion',
+    'still checks links after a %s-spammer deletion is rejected',
     async (source) => {
       const h = pipelineHarness();
       jest
@@ -232,22 +233,8 @@ describe('spammer deletion in the message pipeline', () => {
 
       await h.service.handleUpdate(createUpdate());
 
-      expect(h.kick).toHaveBeenCalled();
+      expect(h.kick).not.toHaveBeenCalled();
       expect(h.ruleEngine.detect).toHaveBeenCalledTimes(1);
     },
   );
-
-  it('retries a developer-forced delete failure instead of acknowledging the message', async () => {
-    const h = pipelineHarness();
-    jest
-      .spyOn(h.internal, 'isDeveloperForcedGlobalSpammerCachedWithHotPathBudget')
-      .mockResolvedValue(true);
-
-    await expect(h.service.handleUpdate(createUpdate())).rejects.toThrow(
-      'Developer-forced spammer message deletion was not accepted',
-    );
-
-    expect(h.kick).toHaveBeenCalledTimes(1);
-    expect(h.ruleEngine.detect).not.toHaveBeenCalled();
-  });
 });

@@ -1234,6 +1234,9 @@ build_guarded_rollback_command() {
   if [[ "$capability_marker" == maxim_topology_require_night_open_notice_cleanup_reader ]]; then
     capability_marker=maxim_topology_require_link_rules_policy_reader
   fi
+  if [[ "$capability_marker" == maxim_topology_require_link_rules_policy_reader ]]; then
+    capability_marker=maxim_topology_require_retired_super_ban
+  fi
 
   if ! tooling_sha="$(git rev-parse --verify --end-of-options 'main^{commit}' 2>/dev/null)"; then
     echo "Cannot resolve local main to the reviewed rollback tooling SHA." >&2

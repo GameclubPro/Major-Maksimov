@@ -61,6 +61,7 @@ export class AdminManualMessageCleanupService {
           source: 'admin_manual_action',
           cleanupKind: 'group_command',
           messageRole: 'command',
+          ordinaryManualCleanupVersion: 1,
         },
         directOptions: {
           immediate: true,
@@ -114,6 +115,7 @@ export class AdminManualMessageCleanupService {
           source: 'admin_manual_action',
           cleanupKind: 'group_command',
           messageRole: 'target',
+          ordinaryManualCleanupVersion: 1,
         },
         directOptions: {
           immediate: true,
@@ -190,6 +192,7 @@ export class AdminManualMessageCleanupService {
           metadata: {
             source: 'admin_manual_action',
             cleanupKind: 'recent_tracked_message',
+            ordinaryManualCleanupVersion: 1,
           },
           directOptions: {
             immediate: true,

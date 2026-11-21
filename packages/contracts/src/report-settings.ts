@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+// FLAG: Retired command spellings in saved aliases cannot grant a different action.
+export function isRetiredSuperBanCommandText(value: string): boolean {
+  return /^[/!]?(?:супер[\s-]+бан|super[\s-]+ban)[.!]?$/iu.test(value.trim());
+}
+
 export const REPORT_DEFAULT_TRIGGERS = ['/report', 'жалоба'] as const;
 export const reportDeleteModeSchema = z.enum(['MESSAGE', 'HISTORY_24H']);
 export const reportSettingsShape = {
@@ -32,7 +37,7 @@ export function addReportCommandIssues(
     .filter(([key]) => /^admin.*Command(Name|Aliases)$/.test(key))
     .flatMap(([, value]) => (typeof value === 'string' ? value.split(/[\n,;]+/u) : []))
     .map((value) => value.trim().toLowerCase().replace(/^[/!]/u, ''));
-  const reserved = new Set([...commands, 'start', 'старт', 'супер бан', 'super ban']);
+  const reserved = new Set([...commands, 'start', 'старт']);
   const triggers = [...REPORT_DEFAULT_TRIGGERS, ...settings.reportsAliases];
   if (new Set(triggers).size !== triggers.length) {
     ctx.addIssue({
@@ -41,7 +46,12 @@ export function addReportCommandIssues(
       message: 'Команды жалоб не должны повторяться.',
     });
   }
-  if (triggers.some((trigger) => reserved.has(trigger.replace(/^[/!]/u, '')))) {
+  if (
+    triggers.some(
+      (trigger) =>
+        isRetiredSuperBanCommandText(trigger) || reserved.has(trigger.replace(/^[/!]/u, '')),
+    )
+  ) {
     ctx.addIssue({
       code: 'custom',
       path: ['reportsAliases'],

@@ -47,9 +47,6 @@ export type SettingsLimitsSectionProps = SettingsSectionShellProps &
     limitsCardStatus: string;
     limitsRulesEnabledCount: number;
     messageLimitsBotButtonErrors: BroadcastLinkButtonFieldErrors[];
-    spammerReviewMetricsQuery: {
-      data?: { enforcementMode?: string };
-    };
   };
 
 const LazySettingsLimitsEditor = recoverableLazyNamedComponent<SettingsLimitsSectionProps>(

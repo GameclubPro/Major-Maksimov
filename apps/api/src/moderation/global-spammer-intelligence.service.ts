@@ -1,5 +1,12 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { BadRequestException, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
+import {
+  BadRequestException,
+  NotFoundException,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Queue } from 'bullmq';
 import { createHash, randomUUID } from 'node:crypto';
@@ -27,27 +34,17 @@ import {
   type GlobalSpammerDenormJob,
 } from './global-spammer-denorm.queue';
 
-export const GLOBAL_SPAMMER_OBSERVATION_SOURCES = [
-  'FANOUT_HIGH',
-  'FANOUT_REPEAT',
-  'COMMERCIAL_AD',
-  'COMMERCIAL_CAMPAIGN',
-  'REPEATED_LINK',
-  'REPEATED_PHONE',
-  'GRAPH_DOMAIN',
-  'GRAPH_PHONE',
-  'GRAPH_TEXT',
-  'GRAPH_CAMPAIGN',
-  'GRAPH_FANOUT_PATTERN',
-  'SANCTION_BAN',
-  'MANUAL_BAN',
-  'DEVELOPER_FORCED',
-  'LOCAL_ADMIN_BLOCK',
-  'LOCAL_ADMIN_ALLOW',
-  'REVIEW_APPROVED',
-] as const;
+import {
+  GLOBAL_SPAMMER_OBSERVATION_SOURCES,
+  type GlobalSpammerObservationSource,
+  hasActiveRegistryProvenance,
+  isActiveObservationSource,
+} from './global-spammer-provenance';
+export {
+  GLOBAL_SPAMMER_OBSERVATION_SOURCES,
+  type GlobalSpammerObservationSource,
+} from './global-spammer-provenance';
 
-export type GlobalSpammerObservationSource = (typeof GLOBAL_SPAMMER_OBSERVATION_SOURCES)[number];
 export type GlobalSpammerConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 export type GlobalSpammerCandidateStatus = 'PENDING' | 'AUTO_APPROVED' | 'APPROVED' | 'SUPPRESSED';
 
@@ -63,7 +60,6 @@ export type GlobalSpammerObservationInput = {
   evidenceHash?: string | null;
   observedAt?: Date;
   ttlDays?: number;
-  registryTtlDays?: number | null;
   forceRegistry?: boolean;
 };
 
@@ -383,6 +379,7 @@ type SpammerObservationLedgerResult = {
   confidenceLevel: GlobalSpammerConfidenceLevel;
   activeSuppression: GlobalSpammerSuppressionRow | null;
   observationId: string;
+  duplicate: boolean;
 };
 
 type DenormObservationSnapshot = {
@@ -396,6 +393,7 @@ type DenormObservationSnapshot = {
   evidenceHash: string;
   evidence: Prisma.JsonValue | null;
   normalizedFeatures: Prisma.JsonValue;
+  expiresAt: Date;
   observedAt: Date;
   suppressedAt: Date | null;
   suppressionReason: string | null;
@@ -403,6 +401,9 @@ type DenormObservationSnapshot = {
 
 type ReviewQueueCandidateIdRow = {
   userId: string;
+  status: GlobalSpammerCandidateStatus;
+  confidenceScore: number;
+  detectedAt: Date;
 };
 
 type ReviewMetricsCountRow = {
@@ -508,7 +509,6 @@ type ResolvedLocalAdminDecision = {
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_OBSERVATION_TTL_DAYS = 14;
 const DEFAULT_SUPPRESSION_TTL_DAYS = 30;
-const DEVELOPER_FORCED_REGISTRY_TTL_DAYS = 3650;
 const OBSERVATION_HALF_LIFE_DAYS = 7;
 const MEDIUM_CONFIDENCE_THRESHOLD = 0.55;
 const HIGH_CONFIDENCE_THRESHOLD = 0.86;
@@ -534,7 +534,6 @@ const SOURCE_DEFAULT_TTL_DAYS: Partial<Record<GlobalSpammerObservationSource, nu
   GRAPH_FANOUT_PATTERN: 7,
   SANCTION_BAN: 21,
   MANUAL_BAN: 30,
-  DEVELOPER_FORCED: DEVELOPER_FORCED_REGISTRY_TTL_DAYS,
   LOCAL_ADMIN_BLOCK: 30,
   LOCAL_ADMIN_ALLOW: 30,
   REVIEW_APPROVED: 90,
@@ -554,7 +553,6 @@ const SOURCE_BASE_REPUTATION_WEIGHTS: Record<GlobalSpammerObservationSource, num
   GRAPH_FANOUT_PATTERN: 0.52,
   SANCTION_BAN: 0.38,
   MANUAL_BAN: 0.36,
-  DEVELOPER_FORCED: 1,
   LOCAL_ADMIN_BLOCK: 0.32,
   LOCAL_ADMIN_ALLOW: 0.36,
   REVIEW_APPROVED: 1,
@@ -562,7 +560,7 @@ const SOURCE_BASE_REPUTATION_WEIGHTS: Record<GlobalSpammerObservationSource, num
 
 const SOURCE_REPUTATION_WINDOW_DAYS = 30;
 const SOURCE_REPUTATION_CACHE_TTL_MS = 30_000;
-const RUNTIME_PROFILE_SOURCE_VERSION = 2;
+const RUNTIME_PROFILE_SOURCE_VERSION = 3;
 const RUNTIME_PROFILE_L1_TTL_MS = 5_000;
 const RUNTIME_PROFILE_L1_MAX_ENTRIES = 10_000;
 const RUNTIME_PROFILE_L1_SWEEP_INTERVAL_MS = 5_000;
@@ -862,49 +860,6 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     });
   }
 
-  async recordDeveloperForcedGlobalBlacklist(params: {
-    userId: string;
-    actorUserId: string;
-    chatId?: string | null;
-    messageId?: string | null;
-    userLabel?: string | null;
-    reason?: string | null;
-    ttlDays?: number | null;
-  }): Promise<GlobalSpammerObservationDecision> {
-    const userId = this.normalizeUserId(params.userId);
-    const actorUserId = this.normalizeUserId(params.actorUserId);
-    if (!userId || !actorUserId) {
-      return this.emptyDecision('ignored', userId);
-    }
-    if (this.isKnownRuntimeBotUserId(userId)) {
-      return this.emptyDecision('ignored', userId);
-    }
-
-    const reason =
-      this.normalizeText(params.reason) || 'По решению разработчика бота за нарушение правил';
-    const ttlDays = Math.max(1, Math.trunc(params.ttlDays ?? DEVELOPER_FORCED_REGISTRY_TTL_DAYS));
-
-    return this.recordObservation({
-      userId,
-      source: 'DEVELOPER_FORCED',
-      score: 1,
-      reason,
-      chatId: params.chatId ?? null,
-      messageId: params.messageId ?? null,
-      userLabel: params.userLabel ?? null,
-      evidenceHash: `developer-forced:${userId}`,
-      evidence: {
-        actorUserId,
-        sourceChatId: params.chatId ?? null,
-        messageId: params.messageId ?? null,
-        reason,
-      },
-      ttlDays,
-      registryTtlDays: ttlDays,
-      forceRegistry: true,
-    });
-  }
-
   async recordLocalAdminDecision(params: {
     chatId: string;
     userId: string;
@@ -976,8 +931,8 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     input: GlobalSpammerObservationInput,
   ): Promise<GlobalSpammerObservationDecision> {
     const userId = this.normalizeUserId(input.userId);
-    if (!userId) {
-      return this.emptyDecision('ignored', '');
+    if (!userId || !isActiveObservationSource(input.source)) {
+      return this.emptyDecision('ignored', userId);
     }
     if (await this.legacyHolds?.isGlobalUserHeld(userId))
       return this.emptyDecision('ignored', userId);
@@ -988,6 +943,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     }
 
     const ledger = await this.recordObservationLedger(userId, input);
+    if (ledger.duplicate) return this.emptyDecision('observed', userId);
     if (this.shouldUseObservationFastPath(input, ledger.activeSuppression)) {
       const enqueued = await this.enqueueObservationDenormJob({
         userId,
@@ -1001,7 +957,11 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       });
       if (!enqueued) {
         this.recordSpammerReadModelEvent('denorm_fast_path_fallback');
-        return this.recordObservationDenormSync(ledger, { enqueueDenormJob: false });
+        const decision = await this.recordObservationDenormSync(ledger, {
+          enqueueDenormJob: false,
+        });
+        await this.settleObservationProjection(ledger.observationId);
+        return decision;
       }
       return {
         outcome: ledger.activeSuppression ? 'suppressed' : 'observed',
@@ -1022,7 +982,10 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       };
     }
 
-    return this.recordObservationDenormSync(ledger);
+    const decision = await this.recordObservationDenormSync(ledger);
+    if (input.messageId || input.evidenceHash)
+      await this.settleObservationProjection(ledger.observationId);
+    return decision;
   }
 
   private async recordObservationLedger(
@@ -1041,12 +1004,9 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         source: input.source,
         chatId: input.chatId ?? null,
         messageId: input.messageId ?? null,
-        evidence: input.evidence ?? Prisma.JsonNull,
+        ...(input.messageId ? {} : { evidence: input.evidence ?? Prisma.JsonNull }),
       });
-    const allowActiveSuppression = input.source !== 'DEVELOPER_FORCED';
-    const activeSuppression = allowActiveSuppression
-      ? await this.findActiveSuppression(userId, now)
-      : null;
+    const activeSuppression = await this.findActiveSuppression(userId, now);
     const confidenceLevel = this.resolveConfidenceLevel(score);
     const ledgerMetadata = this.buildObservationLedgerMetadata({
       input,
@@ -1065,6 +1025,8 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       };
     }
 
+    const proposedId = randomUUID();
+    const exactSource = Boolean(input.messageId || input.evidenceHash);
     const observationRow = await this.prisma.spammerObservation.upsert({
       where: {
         userId_source_evidenceHash: {
@@ -1074,6 +1036,11 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         },
       },
       create: {
+        id: proposedId,
+        projectionDueAt:
+          exactSource || this.shouldUseObservationFastPath(input, activeSuppression)
+            ? new Date(Date.now() + 60_000)
+            : null,
         userId,
         source: input.source,
         score,
@@ -1093,23 +1060,25 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         suppressedAt: activeSuppression ? now : null,
         suppressionReason: activeSuppression?.reason ?? null,
       },
-      update: {
-        score,
-        confidenceLevel,
-        reason: input.reason,
-        chatId: input.chatId ?? null,
-        messageId: input.messageId ?? null,
-        evidence: input.evidence ?? Prisma.JsonNull,
-        normalizedFeatures: ledgerMetadata.normalizedFeatures,
-        ttlDays,
-        explainReason: ledgerMetadata.explainReason,
-        privacyClass: ledgerMetadata.privacyClass,
-        rawEvidenceExpiresAt: ledgerMetadata.rawEvidenceExpiresAt,
-        observedAt: now,
-        expiresAt,
-        suppressedAt: activeSuppression ? now : null,
-        suppressionReason: activeSuppression?.reason ?? null,
-      },
+      update: exactSource
+        ? { evidenceHash }
+        : {
+            score,
+            confidenceLevel,
+            reason: input.reason,
+            chatId: input.chatId ?? null,
+            messageId: input.messageId ?? null,
+            evidence: input.evidence ?? Prisma.JsonNull,
+            normalizedFeatures: ledgerMetadata.normalizedFeatures,
+            ttlDays,
+            explainReason: ledgerMetadata.explainReason,
+            privacyClass: ledgerMetadata.privacyClass,
+            rawEvidenceExpiresAt: ledgerMetadata.rawEvidenceExpiresAt,
+            observedAt: now,
+            expiresAt,
+            suppressedAt: activeSuppression ? now : null,
+            suppressionReason: activeSuppression?.reason ?? null,
+          },
     });
     await this.invalidateRuntimeProfileCaches(userId);
 
@@ -1124,6 +1093,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       confidenceLevel,
       activeSuppression,
       observationId: observationRow.id,
+      duplicate: exactSource && observationRow.id !== proposedId,
     };
   }
 
@@ -1134,7 +1104,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     if (!this.observationFastPathEnabled || !this.observationDenormQueueEnabled) {
       return false;
     }
-    if (input.forceRegistry || input.registryTtlDays) {
+    if (input.forceRegistry) {
       return false;
     }
     return this.observationFastPathSources.has(input.source);
@@ -1247,6 +1217,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       canPromoteToRegistry
     ) {
       await this.promoteToRegistry({
+        detectedAt: now,
         userId,
         sourceChatId: input.chatId ?? null,
         reason: input.reason,
@@ -1255,7 +1226,6 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         status: input.source === 'REVIEW_APPROVED' ? 'APPROVED' : 'AUTO_APPROVED',
         reviewedByUserId: null,
         reviewReason: null,
-        registryTtlDays: input.registryTtlDays ?? null,
       });
       await this.scheduleRuntimeProfileRefresh(userId, input.chatId ?? null, 'record-observation');
       return finish(
@@ -1334,9 +1304,62 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     );
   }
 
+  private async settleObservationProjection(id: string): Promise<void> {
+    await this.prisma.spammerObservation.updateMany({
+      where: { id, projectionDueAt: { not: null } },
+      data: { projectionDueAt: null },
+    });
+  }
+
+  async recoverPendingObservationProjections(now = new Date()): Promise<void> {
+    // FLAG: Only newly journaled observations are eligible. Never infer work from historical evidence.
+    const rows = await this.prisma.spammerObservation.findMany({
+      where: { projectionDueAt: { lte: now } },
+      orderBy: [{ projectionDueAt: 'asc' }, { id: 'asc' }],
+      take: 25,
+      select: {
+        id: true,
+        userId: true,
+        chatId: true,
+        source: true,
+        reason: true,
+        observedAt: true,
+        expiresAt: true,
+        projectionDueAt: true,
+        messageId: true,
+      },
+    });
+    for (const row of rows) {
+      const source = this.normalizeObservationSource(row.source);
+      if (
+        !source ||
+        row.expiresAt <= now ||
+        (await this.legacyHolds?.isGlobalUserHeld(row.userId)) ||
+        (await this.isAbandonedSourceObservation(row))
+      ) {
+        await this.settleObservationProjection(row.id);
+        continue;
+      }
+      const claimed = await this.prisma.spammerObservation.updateMany({
+        where: { id: row.id, projectionDueAt: row.projectionDueAt },
+        data: { projectionDueAt: new Date(now.getTime() + 60_000) },
+      });
+      if (claimed.count !== 1) continue;
+      await this.enqueueObservationDenormJob({
+        userId: row.userId,
+        chatId: row.chatId,
+        observationId: row.id,
+        source,
+        reason: row.reason,
+        observedAt: row.observedAt,
+        fastPath: true,
+      });
+    }
+  }
+
   async processObservationDenormJob(job: GlobalSpammerDenormJob): Promise<void> {
     const userId = this.normalizeUserId(job.userId);
-    if (!userId || this.isKnownRuntimeBotUserId(userId)) {
+    if (!userId || this.isKnownRuntimeBotUserId(userId) || (job.fastPath && !job.observationId)) {
       return;
     }
     if (await this.legacyHolds?.isGlobalUserHeld(userId)) return;
@@ -1348,12 +1371,19 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     )
       return;
     const sourceForHold = this.normalizeObservationSource(job.source);
-    if (sourceForHold && this.shouldProcessObservationFastDenormJob(sourceForHold)) {
+    if (!sourceForHold) return;
+    if (job.fastPath || this.shouldProcessObservationFastDenormJob(sourceForHold)) {
       const snapshot = await this.resolveDenormObservationSnapshot({
         userId,
         observationId: job.observationId ?? null,
       });
-      if (snapshot && (await this.isAbandonedSourceObservation(snapshot))) return;
+      if (
+        !snapshot ||
+        snapshot.expiresAt <= new Date() ||
+        snapshot.source !== sourceForHold ||
+        (await this.isAbandonedSourceObservation(snapshot))
+      )
+        return;
     }
 
     const startedAtMs = Date.now();
@@ -1362,7 +1392,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       const now = new Date();
       const chatId = this.normalizeText(job.chatId ?? null) || null;
       const jobSource = this.normalizeObservationSource(job.source);
-      if (jobSource && this.shouldProcessObservationFastDenormJob(jobSource)) {
+      if (jobSource && (job.fastPath || this.shouldProcessObservationFastDenormJob(jobSource))) {
         await this.recomputeObservationDenormForUser({
           userId,
           chatId,
@@ -1405,6 +1435,8 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         source: 'observation-denorm-job',
         lookupContextProvided: true,
       });
+      if (job.fastPath && job.observationId)
+        await this.settleObservationProjection(job.observationId);
       this.recordSpammerReadModelEvent('denorm_job_processed', {
         jobAgeMs: this.resolveDenormJobAgeMs(job),
       });
@@ -1446,10 +1478,11 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
 
     if (await this.isAbandonedSourceObservation(latest)) return;
 
-    const source = this.normalizeObservationSource(latest.source) ?? null;
+    const source = this.normalizeObservationSource(latest.source);
+    if (!source || latest.expiresAt <= params.now) return;
     const latestInput: GlobalSpammerObservationInput = {
       userId: params.userId,
-      source: source ?? 'FANOUT_REPEAT',
+      source,
       score: latest.score,
       reason: latest.reason,
       chatId: latest.chatId,
@@ -1505,7 +1538,9 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     const mediumConfidenceThreshold = MEDIUM_CONFIDENCE_THRESHOLD + thresholdAdjustment;
     const canPromoteToRegistry = source && this.canPromoteToRegistry(latestInput, aggregate);
 
-    if (aggregate.score >= highConfidenceThreshold && canPromoteToRegistry) {
+    const confirmedFanout =
+      latestInput.source === 'FANOUT_HIGH' && PROMOTION_FANOUT_REASONS.has(latestInput.reason);
+    if ((confirmedFanout || aggregate.score >= highConfidenceThreshold) && canPromoteToRegistry) {
       await this.syncDenormRegistry({
         userId: params.userId,
         sourceChatId: chatId,
@@ -1568,6 +1603,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       evidenceHash: true,
       evidence: true,
       normalizedFeatures: true,
+      expiresAt: true,
       observedAt: true,
       suppressedAt: true,
       suppressionReason: true,
@@ -1581,10 +1617,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         select,
         take: 1,
       });
-      const row = rows[0] ?? null;
-      if (row) {
-        return row;
-      }
+      return rows[0] ?? null;
     }
 
     const rows = await this.prisma.spammerObservation.findMany({
@@ -1701,7 +1734,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           status: 'SUPPRESSED',
           lastReason: input.reason,
           lastChatId: input.sourceChatId ?? null,
-          lastEvidence: input.evidence ?? Prisma.JsonNull,
+          lastEvidence: Prisma.JsonNull,
           confidenceScore: 0,
           sourceBreakdown: {},
           suppressedUntil,
@@ -1714,7 +1747,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           status: 'SUPPRESSED',
           lastReason: input.reason,
           lastChatId: input.sourceChatId ?? null,
-          lastEvidence: input.evidence ?? Prisma.JsonNull,
+          lastEvidence: Prisma.JsonNull,
           confidenceScore: 0,
           suppressedUntil,
           reviewedAt: now,
@@ -1748,6 +1781,26 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     return { ok: true };
   }
 
+  async assertReviewSubjectInChat(chatId: string, targetUserId: string): Promise<void> {
+    const userId = this.normalizeUserId(targetUserId);
+    if (!userId) throw new NotFoundException('No participant evidence in this chat');
+    const [row] = await this.prisma.$queryRaw<{ present: boolean }[]>`
+      SELECT (
+        EXISTS (SELECT 1 FROM global_spammer_candidate_chats
+          WHERE candidate_user_id = ${userId} AND chat_id = ${chatId})
+        OR EXISTS (SELECT 1 FROM global_spammer_candidates
+          WHERE user_id = ${userId} AND last_chat_id = ${chatId})
+        OR EXISTS (SELECT 1 FROM chat_user_display_names
+          WHERE user_id = ${userId} AND chat_id = ${chatId})
+        OR EXISTS (SELECT 1 FROM chat_membership_activity_events
+          WHERE user_id = ${userId} AND chat_id = ${chatId})
+        OR EXISTS (SELECT 1 FROM chat_moderation_feed_items
+          WHERE user_id = ${userId} AND chat_id = ${chatId})
+      ) AS present
+    `;
+    if (!row?.present) throw new NotFoundException('No participant evidence in this chat');
+  }
+
   async reviewCandidate(params: {
     chatId: string;
     userId: string;
@@ -1756,104 +1809,81 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     reason?: string | null;
   }): Promise<{ ok: true; status: GlobalSpammerCandidateStatus; userId: string }> {
     const userId = this.normalizeUserId(params.userId);
-    if (!userId) {
-      throw new Error('User ID is required');
-    }
+    const adminUserId = this.normalizeUserId(params.reviewerUserId);
+    if (!userId || !adminUserId)
+      throw new BadRequestException('User ID and reviewer ID are required');
 
+    const decision = params.action === 'APPROVE' ? 'BLOCK' : 'ALLOW';
+    if (decision === 'BLOCK' && this.isKnownRuntimeBotUserId(userId)) {
+      throw new BadRequestException('Configured MAX bots cannot be marked as spammers.');
+    }
     const reason =
       this.normalizeText(params.reason) ||
       (params.action === 'APPROVE' ? 'REVIEW_APPROVED' : 'REVIEW_SUPPRESSED');
-    const candidateBefore = await this.prisma.globalSpammerCandidate.findUnique({
-      where: {
-        userId,
-      },
-    });
-    const campaignBreakdown = await this.buildCampaignBreakdownForUser(userId);
-    await this.recordReviewFeedback({
-      userId,
-      chatId: params.chatId,
-      reviewerUserId: params.reviewerUserId,
-      action: params.action,
-      reason,
-      candidateBefore,
-      campaignBreakdown,
-    });
-
-    if (params.action === 'SUPPRESS') {
-      await this.recordLocalAdminDecision({
-        chatId: params.chatId,
-        userId,
-        reviewerUserId: params.reviewerUserId,
-        decision: 'ALLOW',
-        reason,
+    const changed = await this.prisma.$transaction(async (tx) => {
+      const initial = await tx.adminGlobalSpammerExemption.createMany({
+        data: { adminUserId, userId, sourceChatId: params.chatId, decision, reason },
+        skipDuplicates: true,
       });
-      const candidateUpdate = await this.prisma.globalSpammerCandidate.updateMany({
-        where: { userId },
+      if (!initial.count) {
+        const update = await tx.adminGlobalSpammerExemption.updateMany({
+          where: {
+            adminUserId,
+            userId,
+            OR: [{ decision: { not: decision } }, { reason: { not: reason } }],
+          },
+          data: { sourceChatId: params.chatId, decision, reason },
+        });
+        if (!update.count) return false;
+      }
+      await tx.globalSpammerReviewFeedback.create({
         data: {
-          status: 'SUPPRESSED',
-          reviewedAt: new Date(),
-          reviewedByUserId: params.reviewerUserId,
-          reviewReason: reason,
-          falsePositive: true,
+          userId,
+          chatId: params.chatId,
+          reviewerUserId: adminUserId,
+          action: params.action,
+          reason,
         },
       });
-      this.logMissingCandidateReviewUpdate(candidateUpdate.count, userId, params.action);
-      await this.markShadowScoresReviewed({
-        userId,
-        action: params.action,
-        reviewerUserId: params.reviewerUserId,
+
+      // Local decisions are weak evidence. Persist them with the decision, once per transition.
+      const now = new Date();
+      const source = decision === 'BLOCK' ? 'LOCAL_ADMIN_BLOCK' : 'LOCAL_ADMIN_ALLOW';
+      const ttlDays = SOURCE_DEFAULT_TTL_DAYS[source] ?? DEFAULT_OBSERVATION_TTL_DAYS;
+      await tx.spammerObservation.createMany({
+        skipDuplicates: true,
+        data: {
+          userId,
+          source,
+          chatId: params.chatId,
+          score: 0.34,
+          reason: source,
+          confidenceLevel: 'LOW',
+          evidenceHash: this.buildEvidenceHash({
+            adminUserId,
+            userId,
+            decision,
+            reason,
+            chatId: params.chatId,
+          }),
+          observedAt: now,
+          expiresAt: new Date(now.getTime() + ttlDays * DAY_MS),
+          ttlDays,
+        },
       });
+      return true;
+    });
+    if (changed) {
       await this.invalidateRuntimeProfileCaches(userId);
       await this.scheduleRuntimeProfileRefresh(userId, params.chatId, 'review-candidate');
-      return { ok: true, status: 'SUPPRESSED', userId };
     }
-
-    await this.recordLocalAdminDecision({
-      chatId: params.chatId,
-      reason,
-      userId,
-      reviewerUserId: params.reviewerUserId,
-      decision: 'BLOCK',
-    });
-    const candidateUpdate = await this.prisma.globalSpammerCandidate.updateMany({
-      where: { userId },
-      data: {
-        status: 'APPROVED',
-        reviewedAt: new Date(),
-        reviewedByUserId: params.reviewerUserId,
-        reviewReason: reason,
-        falsePositive: false,
-      },
-    });
-    this.logMissingCandidateReviewUpdate(candidateUpdate.count, userId, params.action);
-    await this.markShadowScoresReviewed({
-      userId,
-      action: params.action,
-      reviewerUserId: params.reviewerUserId,
-    });
-    await this.invalidateRuntimeProfileCaches(userId);
-    await this.scheduleRuntimeProfileRefresh(userId, params.chatId, 'review-candidate');
-
-    return { ok: true, status: 'APPROVED', userId };
-  }
-
-  private logMissingCandidateReviewUpdate(
-    updatedCount: number,
-    userId: string,
-    action: CandidateReviewAction,
-  ) {
-    if (updatedCount > 0) {
-      return;
-    }
-
-    this.logger.warn(
-      { userId, action },
-      'Global spammer candidate disappeared before review status update',
-    );
+    return { ok: true, status: decision === 'BLOCK' ? 'APPROVED' : 'SUPPRESSED', userId };
   }
 
   async listReviewQueue(params: {
     chatId: string;
+    reviewerUserId?: string;
+    cursor?: string;
     status?: GlobalSpammerCandidateStatus | 'ALL';
     limit?: number;
     includeObservations?: boolean;
@@ -1864,15 +1894,32 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     const limit = Math.max(1, Math.min(params.limit ?? 50, 100));
     const status = params.status && params.status !== 'ALL' ? params.status : undefined;
     const includeObservations = params.includeObservations ?? true;
-    const candidateIds = await this.timeSpammerStage(timings, 'candidateIdQueryMs', () =>
+    const candidatePage = await this.timeSpammerStage(timings, 'candidateIdQueryMs', () =>
       this.listReviewQueueCandidateIds({
         chatId: params.chatId,
         status,
-        limit,
+        reviewerUserId: params.reviewerUserId,
+        cursor: params.cursor,
+        limit: limit + 1,
       }),
     );
+    const candidateIds = candidatePage.slice(0, limit).map((row) => row.userId);
+    const rowByUser = new Map(candidatePage.map((row) => [row.userId, row]));
+    const last = candidatePage[limit - 1];
+    const nextCursor =
+      candidatePage.length > limit && last
+        ? Buffer.from(
+            JSON.stringify([
+              params.chatId,
+              status,
+              last.confidenceScore,
+              last.detectedAt,
+              last.userId,
+            ]),
+          ).toString('base64url')
+        : null;
     const loadedCandidates = await this.timeSpammerStage(timings, 'candidateQueryMs', () =>
-      this.loadReviewQueueCandidatesByIds(candidateIds),
+      this.loadReviewQueueCandidatesByIds(params.chatId, candidateIds),
     );
     const candidatesByUserId = new Map(
       loadedCandidates.map((candidate) => [candidate.userId, candidate]),
@@ -1895,7 +1942,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       !includeObservations || userIds.length === 0
         ? []
         : await this.timeSpammerStage(timings, 'observationsQueryMs', () =>
-            this.listReviewQueueObservations(userIds, 6),
+            this.listReviewQueueObservations(params.chatId, userIds, 6),
           );
     const observationsByUserId = new Map<string, typeof observations>();
     for (const observation of observations) {
@@ -1908,23 +1955,26 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       items: candidates.map((candidate) => ({
         userId: candidate.userId,
         displayName: localProfilesByUserId.get(candidate.userId)?.displayName ?? null,
-        status: candidate.status,
+        status: rowByUser.get(candidate.userId)?.status ?? candidate.status,
         confidenceScore: this.clampScore(candidate.confidenceScore),
-        sourceBreakdown: candidate.sourceBreakdown,
-        lastReason: candidate.lastReason,
-        lastChatId: candidate.lastChatId,
-        lastEvidence: candidate.lastEvidence,
-        lastUserLabel: candidate.lastUserLabel,
+        sourceBreakdown: {},
+        lastReason:
+          candidate.lastChatId === params.chatId ? 'LOCAL_OBSERVATION' : 'CROSS_CHAT_SIGNAL',
+        lastChatId: candidate.lastChatId === params.chatId ? params.chatId : null,
+        lastEvidence: null,
+        lastUserLabel:
+          candidate.chats[0]?.lastUserLabel ??
+          (candidate.lastChatId === params.chatId ? candidate.lastUserLabel : null),
         suppressedUntil: candidate.suppressedUntil?.toISOString() ?? null,
-        reviewedAt: candidate.reviewedAt?.toISOString() ?? null,
-        reviewedByUserId: candidate.reviewedByUserId,
-        reviewReason: candidate.reviewReason,
-        falsePositive: candidate.falsePositive,
+        reviewedAt: null,
+        reviewedByUserId: null,
+        reviewReason: null,
+        falsePositive: false,
         chats: candidate.chats.map((chat) => ({
           chatId: chat.chatId,
           detectionsCount: chat.detectionsCount,
           lastMessageId: chat.lastMessageId,
-          lastExcerpt: chat.lastExcerpt,
+          lastExcerpt: null,
           lastUserLabel: chat.lastUserLabel,
           lastDetectedAt: chat.lastDetectedAt.toISOString(),
         })),
@@ -1933,18 +1983,19 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           source: row.source,
           score: this.clampScore(row.score),
           confidenceLevel: this.normalizeConfidenceLevel(row.confidenceLevel, row.score),
-          reason: row.reason,
+          reason: row.source,
           chatId: row.chatId,
           messageId: row.messageId,
           evidenceHash: row.evidenceHash,
-          evidence: row.evidence,
+          evidence: null,
           observedAt: row.observedAt.toISOString(),
           expiresAt: row.expiresAt.toISOString(),
           suppressedAt: row.suppressedAt?.toISOString() ?? null,
-          suppressionReason: row.suppressionReason,
+          suppressionReason: null,
         })),
       })),
       limit,
+      nextCursor,
     };
     this.logSpammerIntelligenceTiming('listReviewQueue', {
       chatId: params.chatId,
@@ -1961,8 +2012,16 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     return result;
   }
 
+  getEnforcementMode(): GlobalSpammerEnforcementMode {
+    return this.defaultEnforcementMode;
+  }
+
   async getReviewMetrics(
-    params: { chatId?: string | null; mode?: GlobalSpammerReviewMetricsMode } = {},
+    params: {
+      chatId?: string | null;
+      reviewerUserId?: string;
+      mode?: GlobalSpammerReviewMetricsMode;
+    } = {},
   ) {
     const startedAtMs = Date.now();
     const timings: Record<string, number> = {};
@@ -1980,7 +2039,11 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     const [candidateMetrics, observationMetrics, registryMetrics, sourceReputation, topCampaigns] =
       await Promise.all([
         this.timeSpammerStage(timings, 'candidateMetricsMs', () =>
-          this.getReviewCandidateMetrics({ chatId: params.chatId ?? null, since }),
+          this.getReviewCandidateMetrics({
+            chatId: params.chatId ?? null,
+            reviewerUserId: params.reviewerUserId,
+            since,
+          }),
         ),
         this.timeSpammerStage(timings, 'observationMetricsMs', () =>
           this.getReviewObservationMetrics({ chatId: params.chatId ?? null, since }),
@@ -2103,7 +2166,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           detectionsCount: row.detectionsCount,
           lastReason: row.lastReason,
           lastChatId: row.lastChatId,
-          lastEvidence: row.lastEvidence ?? Prisma.JsonNull,
+          lastEvidence: Prisma.JsonNull,
           confidenceScore: row.confidenceScore,
           confirmedAt: row.confirmedAt,
           expiredAt: row.expiresAt,
@@ -2226,7 +2289,8 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         id: row.id,
       },
       data: {
-        evidence: this.buildMinimizedEvidence(row.evidence, row.normalizedFeatures, now),
+        evidence: this.buildMinimizedEvidence(row.normalizedFeatures, now),
+        normalizedFeatures: this.buildMinimizedEvidence(row.normalizedFeatures, now),
         privacyClass: 'MINIMIZED',
         rawEvidenceExpiresAt: null,
       },
@@ -2234,28 +2298,27 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
   }
 
   private buildMinimizedEvidence(
-    evidence: Prisma.JsonValue | null,
     normalizedFeatures: Prisma.JsonValue | null,
     now: Date,
   ): Prisma.InputJsonObject {
-    const evidenceRecord = this.asRecord(evidence);
     const featureRecord = this.asRecord(normalizedFeatures);
-    const rawText =
-      this.readString(evidenceRecord?.excerpt) ||
-      this.readString(evidenceRecord?.text) ||
-      this.readString(evidenceRecord?.messageText) ||
-      this.readString(this.asRecord(evidenceRecord?.evidence)?.excerpt) ||
-      '';
-
+    const urlHashes = this.asJsonArray(featureRecord?.urlHashes);
+    const legacyUrls = this.asJsonArray(featureRecord?.urls);
     const fanout = this.asRecord(featureRecord?.fanout);
 
     return {
       minimizedAt: now.toISOString(),
       rawEvidencePruned: true,
-      excerpt: rawText ? maskText(rawText) : null,
       evidenceHash: this.readString(featureRecord?.evidenceHash),
       domains: this.asJsonArray(featureRecord?.domains).slice(0, 10),
-      urls: this.asJsonArray(featureRecord?.urls).slice(0, 10),
+      urlHashes: [
+        ...new Set([
+          ...urlHashes,
+          ...legacyUrls
+            .filter((url): url is string => typeof url === 'string')
+            .map((url) => this.buildEvidenceHash(url)),
+        ]),
+      ].slice(0, 10),
       phoneHashes: this.asJsonArray(featureRecord?.phoneHashes).slice(0, 10),
       textSignature: this.readString(featureRecord?.textSignature),
       campaignHash: this.readString(featureRecord?.campaignHash),
@@ -2424,30 +2487,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
               userId,
             },
           });
-    const developerForcedRegistryActive =
-      Boolean(registry?.expiresAt && registry.expiresAt > now) &&
-      this.hasDeveloperForcedSource(registry?.sourceBreakdown);
-
-    if (developerForcedRegistryActive && registry) {
-      const action = enforcementMode === 'shadow' ? 'SHADOW_DELETE_AND_KICK' : 'DELETE_AND_KICK';
-      decision = this.buildPolicyDecision({
-        userId,
-        chatId,
-        trigger: params.trigger,
-        registryStatus: 'ACTIVE_CONFIRMED',
-        action,
-        enforcementMode,
-        deleteSpammersEnabled: params.deleteSpammersEnabled,
-        adminExempt,
-        confidenceScore: registry.confidenceScore,
-        reason: registry.lastReason,
-        expiresAt: registry.expiresAt?.toISOString() ?? null,
-        sourceBreakdown: registry.sourceBreakdown,
-        enforced: Boolean(
-          (params.enforced ?? params.recordDecision) && action === 'DELETE_AND_KICK',
-        ),
-      });
-    } else if (adminExempt) {
+    if (adminExempt) {
       decision = this.buildPolicyDecision({
         userId,
         chatId,
@@ -2480,7 +2520,11 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         enforced: false,
       });
     } else {
-      if (registry?.expiresAt && registry.expiresAt > now) {
+      if (
+        registry?.expiresAt &&
+        registry.expiresAt > now &&
+        hasActiveRegistryProvenance(registry.sourceBreakdown)
+      ) {
         const action = !params.deleteSpammersEnabled
           ? 'NONE'
           : enforcementMode === 'shadow'
@@ -2499,11 +2543,9 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           reason: registry.lastReason,
           expiresAt: registry.expiresAt.toISOString(),
           sourceBreakdown: registry.sourceBreakdown,
-          enforced: Boolean(
-            (params.enforced ?? params.recordDecision) && action === 'DELETE_AND_KICK',
-          ),
+          enforced: Boolean(params.enforced === true && action === 'DELETE_AND_KICK'),
         });
-      } else if (registry) {
+      } else if (registry && (!registry.expiresAt || registry.expiresAt <= now)) {
         decision = this.buildPolicyDecision({
           userId,
           chatId,
@@ -2534,6 +2576,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           trigger: params.trigger,
           registryStatus:
             candidate?.status === 'PENDING' &&
+            hasActiveRegistryProvenance(candidate.sourceBreakdown) &&
             candidate.confidenceScore >= MEDIUM_CONFIDENCE_THRESHOLD
               ? 'MEDIUM_REVIEW'
               : 'NONE',
@@ -2642,7 +2685,11 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       options.includeObservations
         ? this.timeSpammerStage(timings, 'observationsQueryMs', () =>
             this.prisma.spammerObservation.findMany({
-              where: { userId },
+              where: {
+                userId,
+                ...(chatId ? { chatId } : {}),
+                source: { in: [...GLOBAL_SPAMMER_OBSERVATION_SOURCES] },
+              },
               orderBy: { observedAt: 'desc' },
               take: 20,
               select: {
@@ -2665,6 +2712,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
               where: {
                 userId,
                 expiresAt: { gt: now },
+                ...(chatId ? { chatId } : {}),
               },
               orderBy: { observedAt: 'desc' },
               take: 20,
@@ -2743,36 +2791,41 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     const result = {
       userId,
       chatId,
-      policy,
+      policy: chatId ? { ...policy, reason: policy.registryStatus, sourceBreakdown: null } : policy,
       registry: {
-        active: Boolean(registry?.expiresAt && registry.expiresAt > now),
+        active: Boolean(
+          registry?.expiresAt &&
+          registry.expiresAt > now &&
+          hasActiveRegistryProvenance(registry.sourceBreakdown),
+        ),
         expired: Boolean(registry && (!registry.expiresAt || registry.expiresAt <= now)),
         confidenceScore: registry?.confidenceScore ?? null,
         confirmedAt: registry?.confirmedAt?.toISOString() ?? null,
-        confirmedByUserId: candidate?.reviewedByUserId ?? null,
-        reason: registry?.lastReason ?? null,
+        confirmedByUserId: chatId ? null : (candidate?.reviewedByUserId ?? null),
+        reason: chatId ? null : (registry?.lastReason ?? null),
         expiresAt: registry?.expiresAt?.toISOString() ?? null,
-        sourceBreakdown: registry?.sourceBreakdown ?? null,
+        sourceBreakdown: chatId ? null : (registry?.sourceBreakdown ?? null),
       },
       candidate: candidate
         ? {
             status: candidate.status,
             confidenceScore: this.clampScore(candidate.confidenceScore),
-            lastReason: candidate.lastReason,
+            lastReason: chatId ? 'OBSERVATION' : candidate.lastReason,
             reviewedAt: candidate.reviewedAt?.toISOString() ?? null,
-            reviewedByUserId: candidate.reviewedByUserId,
-            reviewReason: candidate.reviewReason,
+            reviewedByUserId: chatId ? null : candidate.reviewedByUserId,
+            reviewReason: chatId ? null : candidate.reviewReason,
             falsePositive: candidate.falsePositive,
           }
         : null,
-      activeSuppression: activeSuppression
-        ? {
-            source: activeSuppression.source,
-            reason: activeSuppression.reason,
-            adminUserId: activeSuppression.adminUserId,
-            suppressedUntil: activeSuppression.suppressedUntil.toISOString(),
-          }
-        : null,
+      activeSuppression:
+        activeSuppression && (!chatId || activeSuppression.sourceChatId === chatId)
+          ? {
+              source: activeSuppression.source,
+              reason: activeSuppression.reason,
+              adminUserId: activeSuppression.adminUserId,
+              suppressedUntil: activeSuppression.suppressedUntil.toISOString(),
+            }
+          : null,
       observations: observations.map((row) => ({
         id: row.id,
         source: row.source,
@@ -2793,14 +2846,18 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         expiresAt: row.expiresAt.toISOString(),
       })),
       sourceReputation: reputation,
-      campaigns,
+      campaigns: chatId ? campaigns.map((campaign) => ({ ...campaign, preview: null })) : campaigns,
       latestShadowScore,
       localAdminDecision: localAdminDecision
         ? {
             decision: localAdminDecision.decision,
-            reason: localAdminDecision.reason,
-            sourceChatId: localAdminDecision.sourceChatId,
-            decidedByUserIds: localAdminDecision.decidedByUserIds,
+            reason:
+              localAdminDecision.sourceChatId === chatId
+                ? localAdminDecision.reason
+                : localAdminDecision.decision,
+            sourceChatId: localAdminDecision.sourceChatId === chatId ? chatId : null,
+            decidedByUserIds:
+              localAdminDecision.sourceChatId === chatId ? localAdminDecision.decidedByUserIds : [],
             updatedAt: localAdminDecision.updatedAt.toISOString(),
           }
         : null,
@@ -2836,50 +2893,66 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
   private async listReviewQueueCandidateIds(params: {
     chatId: string;
     status?: GlobalSpammerCandidateStatus;
+    reviewerUserId?: string;
+    cursor?: string;
     limit: number;
-  }): Promise<string[]> {
-    const statusFilter = params.status ? Prisma.sql`AND c.status = ${params.status}` : Prisma.empty;
-    const rows = await this.prisma.$queryRaw<ReviewQueueCandidateIdRow[]>(Prisma.sql`
-      WITH scoped_candidates AS (
-        SELECT
-          c.user_id,
-          c.confidence_score,
-          GREATEST(edge.last_detected_at, c.last_detected_at) AS rank_detected_at,
-          c.last_detected_at
-        FROM global_spammer_candidate_chats edge
-        INNER JOIN global_spammer_candidates c ON c.user_id = edge.candidate_user_id
-        WHERE edge.chat_id = ${params.chatId}
-          ${statusFilter}
-
+  }): Promise<ReviewQueueCandidateIdRow[]> {
+    let after = Prisma.empty;
+    if (params.cursor) {
+      try {
+        const [chatId, status, score, date, userId] = JSON.parse(
+          Buffer.from(params.cursor, 'base64url').toString('utf8'),
+        );
+        const detectedAt = new Date(date);
+        if (
+          chatId !== params.chatId ||
+          status !== (params.status ?? null) ||
+          !Number.isFinite(score) ||
+          !Number.isFinite(detectedAt.getTime()) ||
+          typeof userId !== 'string' ||
+          !userId ||
+          userId.length > 128
+        )
+          throw new Error('Invalid cursor');
+        after = Prisma.sql`AND (confidence_score, detected_at, user_id) <
+          (${score}::double precision, ${detectedAt}::timestamp, ${userId})`;
+      } catch {
+        throw new BadRequestException('Invalid spammer review cursor');
+      }
+    }
+    const statusFilter = params.status ? Prisma.sql`AND status = ${params.status}` : Prisma.empty;
+    return this.prisma.$queryRaw<ReviewQueueCandidateIdRow[]>(Prisma.sql`
+      WITH scoped AS (
+        SELECT candidate_user_id AS user_id, last_detected_at
+        FROM global_spammer_candidate_chats WHERE chat_id = ${params.chatId}
         UNION ALL
-
-        SELECT
-          c.user_id,
-          c.confidence_score,
-          c.last_detected_at AS rank_detected_at,
-          c.last_detected_at
-        FROM global_spammer_candidates c
-        WHERE c.last_chat_id = ${params.chatId}
-          ${statusFilter}
-      ),
-      ranked_candidates AS (
-        SELECT DISTINCT ON (user_id)
-          user_id,
-          confidence_score,
-          rank_detected_at,
-          last_detected_at
-        FROM scoped_candidates
-        ORDER BY user_id, confidence_score DESC, rank_detected_at DESC, last_detected_at DESC
+        SELECT user_id, last_detected_at
+        FROM global_spammer_candidates WHERE last_chat_id = ${params.chatId}
+      ), latest AS (
+        SELECT user_id, MAX(last_detected_at) AS detected_at FROM scoped GROUP BY user_id
+      ), ranked AS (
+        SELECT c.user_id, c.confidence_score, l.detected_at,
+          CASE
+            WHEN e.decision = 'ALLOW' THEN 'SUPPRESSED'
+            WHEN e.decision = 'BLOCK' THEN 'APPROVED'
+            WHEN c.status IN ('APPROVED', 'SUPPRESSED')
+              AND c.reviewed_by_user_id IS NOT NULL AND c.suppressed_until IS NULL THEN 'PENDING'
+            ELSE c.status
+          END AS status
+        FROM latest l
+        JOIN global_spammer_candidates c ON c.user_id = l.user_id
+        LEFT JOIN admin_global_spammer_exemptions e
+          ON e.user_id = c.user_id AND e.admin_user_id = ${params.reviewerUserId ?? null}
       )
-      SELECT user_id AS "userId"
-      FROM ranked_candidates
-      ORDER BY confidence_score DESC, rank_detected_at DESC, last_detected_at DESC
+      SELECT user_id AS "userId", confidence_score AS "confidenceScore",
+        detected_at AS "detectedAt", status
+      FROM ranked WHERE true ${statusFilter} ${after}
+      ORDER BY confidence_score DESC, detected_at DESC, user_id DESC
       LIMIT ${params.limit}
     `);
-    return rows.map((row) => row.userId).filter(Boolean);
   }
 
-  private async loadReviewQueueCandidatesByIds(userIds: readonly string[]) {
+  private async loadReviewQueueCandidatesByIds(chatId: string, userIds: readonly string[]) {
     if (userIds.length === 0) {
       return [];
     }
@@ -2891,6 +2964,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       },
       include: {
         chats: {
+          where: { chatId },
           orderBy: {
             lastDetectedAt: 'desc',
           },
@@ -2901,6 +2975,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
   }
 
   private async listReviewQueueObservations(
+    chatId: string,
     userIds: readonly string[],
     perUserLimit: number,
   ): Promise<ReviewQueueObservationRow[]> {
@@ -2943,8 +3018,9 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           suppressed_at,
           suppression_reason
         FROM spammer_observations
-        WHERE user_id = selected.user_id
-        ORDER BY observed_at DESC
+        WHERE user_id = selected.user_id AND chat_id = ${chatId}
+          AND source IN (${Prisma.join(GLOBAL_SPAMMER_OBSERVATION_SOURCES)})
+        ORDER BY observed_at DESC, id DESC
         LIMIT ${take}
       ) observation ON TRUE
       ORDER BY selected.user_id, observation.observed_at DESC
@@ -2957,6 +3033,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     candidates?: ReadonlyArray<{
       userId: string;
       lastUserLabel?: string | null;
+      lastChatId?: string | null;
       chats?: ReadonlyArray<{
         chatId: string;
         lastUserLabel?: string | null;
@@ -2985,7 +3062,10 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         )
         .map((chat) => this.normalizeUserFacingName(chat.lastUserLabel, userId))
         .find((label) => label.length > 0);
-      const candidateLabel = this.normalizeUserFacingName(candidate?.lastUserLabel, userId);
+      const candidateLabel = this.normalizeUserFacingName(
+        candidate?.lastChatId === params.chatId ? candidate?.lastUserLabel : null,
+        userId,
+      );
       const displayName = chatLabel || candidateLabel || null;
       if (displayName) {
         profiles.set(userId, { userId, displayName });
@@ -3024,6 +3104,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
 
   private async getReviewCandidateMetrics(params: {
     chatId?: string | null;
+    reviewerUserId?: string;
     since: Date;
   }): Promise<{
     pending: number;
@@ -3037,44 +3118,31 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
   }> {
     const chatScopedCandidates = params.chatId
       ? Prisma.sql`
-          SELECT DISTINCT ON (user_id)
-            user_id,
-            status,
-            first_detected_at,
-            reviewed_at,
-            false_positive
+          SELECT c.user_id,
+            CASE
+              WHEN e.decision = 'ALLOW' THEN 'SUPPRESSED'
+              WHEN e.decision = 'BLOCK' THEN 'APPROVED'
+              WHEN c.status IN ('APPROVED', 'SUPPRESSED')
+                AND c.reviewed_by_user_id IS NOT NULL AND c.suppressed_until IS NULL THEN 'PENDING'
+              ELSE c.status
+            END AS status,
+            c.first_detected_at, COALESCE(e.updated_at, c.reviewed_at) AS reviewed_at,
+            e.decision = 'ALLOW' AS false_positive,
+            e.decision IN ('ALLOW', 'BLOCK') AS reviewed
           FROM (
-            SELECT
-              c.user_id,
-              c.status,
-              c.first_detected_at,
-              c.reviewed_at,
-              c.false_positive
-            FROM global_spammer_candidate_chats edge
-            INNER JOIN global_spammer_candidates c ON c.user_id = edge.candidate_user_id
-            WHERE edge.chat_id = ${params.chatId}
-
-            UNION ALL
-
-            SELECT
-              c.user_id,
-              c.status,
-              c.first_detected_at,
-              c.reviewed_at,
-              c.false_positive
-            FROM global_spammer_candidates c
-            WHERE c.last_chat_id = ${params.chatId}
-          ) scoped
-          ORDER BY user_id
+            SELECT candidate_user_id AS user_id FROM global_spammer_candidate_chats
+            WHERE chat_id = ${params.chatId}
+            UNION
+            SELECT user_id FROM global_spammer_candidates WHERE last_chat_id = ${params.chatId}
+          ) local
+          JOIN global_spammer_candidates c USING (user_id)
+          LEFT JOIN admin_global_spammer_exemptions e
+            ON e.user_id = c.user_id AND e.admin_user_id = ${params.reviewerUserId ?? null}
         `
       : Prisma.sql`
-          SELECT
-            c.user_id,
-            c.status,
-            c.first_detected_at,
-            c.reviewed_at,
-            c.false_positive
-          FROM global_spammer_candidates c
+          SELECT user_id, status, first_detected_at, reviewed_at,
+            false_positive, status IN ('APPROVED', 'SUPPRESSED') AS reviewed
+          FROM global_spammer_candidates
         `;
     const rows = await this.prisma.$queryRaw<ReviewMetricsCountRow[]>(Prisma.sql`
       WITH scoped_candidates AS (
@@ -3084,7 +3152,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         COUNT(*) FILTER (WHERE status = 'PENDING')::bigint AS "pending",
         COUNT(*) FILTER (WHERE status IN ('APPROVED', 'AUTO_APPROVED'))::bigint AS "approved",
         COUNT(*) FILTER (WHERE status = 'SUPPRESSED')::bigint AS "suppressed",
-        COUNT(*) FILTER (WHERE status IN ('APPROVED', 'SUPPRESSED'))::bigint AS "reviewed",
+        COUNT(*) FILTER (WHERE reviewed)::bigint AS "reviewed",
         COUNT(*) FILTER (WHERE false_positive = true)::bigint AS "falsePositiveCount",
         COUNT(*) FILTER (WHERE first_detected_at >= ${params.since})::bigint AS "newCandidates24h",
         COUNT(*) FILTER (
@@ -3125,6 +3193,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           0::bigint AS "suppressedCount"
         FROM spammer_observations
         WHERE observed_at >= ${params.since}
+          AND source IN (${Prisma.join(GLOBAL_SPAMMER_OBSERVATION_SOURCES)})
           ${chatFilter}
         GROUP BY source
 
@@ -3135,7 +3204,8 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
           0::bigint AS "observedCount",
           COUNT(*)::bigint AS "suppressedCount"
         FROM spammer_observations
-        WHERE suppressed_at >= ${params.since}
+        WHERE observed_at >= ${params.since} AND suppressed_at IS NOT NULL
+          AND source IN (${Prisma.join(GLOBAL_SPAMMER_OBSERVATION_SOURCES)})
           ${chatFilter}
         GROUP BY source
       ) metrics
@@ -3253,31 +3323,12 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
 
     const since = new Date(now.getTime() - SOURCE_REPUTATION_WINDOW_DAYS * DAY_MS);
     const reputationRows = await this.prisma.$queryRaw<SourceReputationRow[]>(Prisma.sql`
-      SELECT
-        source,
-        SUM("observedCount")::bigint AS "observedCount",
-        SUM("suppressedCount")::bigint AS "suppressedCount"
-      FROM (
-        SELECT
-          source,
-          COUNT(*)::bigint AS "observedCount",
-          0::bigint AS "suppressedCount"
-        FROM spammer_observations
-        WHERE observed_at >= ${since}
-        GROUP BY source
-
-        UNION ALL
-
-        SELECT
-          source,
-          0::bigint AS "observedCount",
-          COUNT(*)::bigint AS "suppressedCount"
-        FROM spammer_observations
-        WHERE suppressed_at >= ${since}
-        GROUP BY source
-      ) reputation
+      SELECT source, COUNT(*)::bigint AS "observedCount",
+        COUNT(*) FILTER (WHERE suppressed_at IS NOT NULL AND suppressed_at <= ${now})::bigint AS "suppressedCount"
+      FROM spammer_observations
+      WHERE observed_at >= ${since} AND observed_at <= ${now}
+        AND source IN (${Prisma.join([...GLOBAL_SPAMMER_OBSERVATION_SOURCES])})
       GROUP BY source
-      HAVING SUM("observedCount") > 0
       ORDER BY source ASC
     `);
     const rows = reputationRows
@@ -3485,15 +3536,11 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       return null;
     }
 
-    const developerForcedProfileActive =
-      snapshot.registryStatus === 'ACTIVE_CONFIRMED' &&
-      this.hasDeveloperForcedSource(snapshot.sourceBreakdown);
-    const adminExempt = params.adminExempt && !developerForcedProfileActive;
+    const adminExempt = params.adminExempt;
     const baseAction = this.resolveRuntimeProfileAction({
       snapshot,
       deleteSpammersEnabled: params.deleteSpammersEnabled,
       enforcementMode: params.enforcementMode,
-      developerForced: developerForcedProfileActive,
     });
     const decision = this.attachPolicyRiskContext(
       this.buildPolicyDecision({
@@ -3510,9 +3557,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         expiresAt: adminExempt ? null : (snapshot.expiresAt ?? snapshot.suppressedUntil),
         sourceBreakdown: adminExempt ? null : snapshot.sourceBreakdown,
         enforced: Boolean(
-          (params.enforced ?? params.recordDecision) &&
-          !adminExempt &&
-          baseAction === 'DELETE_AND_KICK',
+          params.enforced === true && !adminExempt && baseAction === 'DELETE_AND_KICK',
         ),
       }),
       {
@@ -3646,12 +3691,11 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     snapshot: RuntimeProfileSnapshot;
     deleteSpammersEnabled: boolean;
     enforcementMode: GlobalSpammerEnforcementMode;
-    developerForced: boolean;
   }): GlobalSpammerPolicyAction {
     if (
       params.snapshot.registryStatus !== 'ACTIVE_CONFIRMED' ||
       params.snapshot.action === 'NONE' ||
-      (!params.deleteSpammersEnabled && !params.developerForced)
+      !params.deleteSpammersEnabled
     ) {
       return 'NONE';
     }
@@ -3804,7 +3848,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
   }
 
   private buildRuntimeProfileCacheKey(userId: string): string {
-    return `spammer:profile:v2:${userId}`;
+    return `spammer:profile:v${RUNTIME_PROFILE_SOURCE_VERSION}:${userId}`;
   }
 
   private recordSpammerReadModelEvent(
@@ -3854,7 +3898,10 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     }
     if (
       snapshot.registryStatus === 'ACTIVE_CONFIRMED' &&
-      (!snapshot.expiresAt || new Date(snapshot.expiresAt) <= now)
+      (!snapshot.expiresAt ||
+        !Number.isFinite(Date.parse(snapshot.expiresAt)) ||
+        new Date(snapshot.expiresAt) <= now ||
+        !hasActiveRegistryProvenance(snapshot.sourceBreakdown))
     ) {
       return false;
     }
@@ -4140,7 +4187,9 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       fastPath: params.fastPath === true,
       createdAt: new Date().toISOString(),
     };
-    const deduplicationId = buildGlobalSpammerDenormDeduplicationId(params.userId);
+    const deduplicationId = params.fastPath
+      ? buildGlobalSpammerDenormDeduplicationId('observation:' + params.observationId)
+      : buildGlobalSpammerDenormDeduplicationId(params.userId);
 
     try {
       await this.observationDenormQueue.add(GLOBAL_SPAMMER_DENORM_JOB_NAME, payload, {
@@ -4374,10 +4423,9 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         : normalizedText
           ? 'SENSITIVE_TEXT'
           : 'STANDARD';
-    const rawEvidenceExpiresAt =
-      privacyClass === 'STANDARD'
-        ? null
-        : new Date(params.observedAt.getTime() + RAW_EVIDENCE_RETENTION_DAYS * DAY_MS);
+    const rawEvidenceExpiresAt = new Date(
+      params.observedAt.getTime() + RAW_EVIDENCE_RETENTION_DAYS * DAY_MS,
+    );
     const normalizedFeatures: Prisma.InputJsonObject = {
       source: params.input.source,
       reason: params.input.reason,
@@ -4388,7 +4436,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       observedAt: params.observedAt.toISOString(),
       expiresAt: params.expiresAt.toISOString(),
       domains: [...domains].slice(0, 10),
-      urls: [...urls].slice(0, 10),
+      urlHashes: [...urls].slice(0, 10).map((url) => this.buildEvidenceHash(url)),
       phoneHashes: [...phoneHashes].slice(0, 10),
       textSignature: normalizedText ? this.buildEvidenceHash(normalizedText) : null,
       campaignHash: campaignValue ? this.buildEvidenceHash(campaignValue) : null,
@@ -4831,10 +4879,10 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         signalType: 'URL',
         source: 'GRAPH_DOMAIN',
         value: url,
-        preview: url,
+        preview: new URL(url).hostname,
         reason: 'CAMPAIGN_URL_REUSE',
         score: 0.62,
-        evidence: { url },
+        evidence: { urlHash: this.buildEvidenceHash(url) },
       });
     }
     for (const phone of phones) {
@@ -5080,55 +5128,6 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       breakdown[campaign.clusterId] = campaign;
     }
     return breakdown as Prisma.InputJsonObject;
-  }
-
-  private async recordReviewFeedback(params: {
-    userId: string;
-    chatId: string;
-    reviewerUserId: string;
-    action: CandidateReviewAction;
-    reason: string;
-    candidateBefore: {
-      status?: string | null;
-      confidenceScore?: number | null;
-      sourceBreakdown?: Prisma.JsonValue | null;
-    } | null;
-    campaignBreakdown: Prisma.InputJsonObject;
-  }): Promise<void> {
-    await this.prisma.globalSpammerReviewFeedback.create({
-      data: {
-        userId: params.userId,
-        chatId: params.chatId,
-        reviewerUserId: params.reviewerUserId,
-        action: params.action,
-        reason: params.reason,
-        candidateStatusBefore: params.candidateBefore?.status ?? null,
-        confidenceScoreBefore:
-          typeof params.candidateBefore?.confidenceScore === 'number'
-            ? this.roundScore(params.candidateBefore.confidenceScore)
-            : null,
-        sourceBreakdown: params.candidateBefore?.sourceBreakdown ?? {},
-        campaignBreakdown: params.campaignBreakdown,
-      },
-    });
-  }
-
-  private async markShadowScoresReviewed(params: {
-    userId: string;
-    action: CandidateReviewAction;
-    reviewerUserId: string;
-  }): Promise<void> {
-    await this.prisma.globalSpammerShadowScore.updateMany({
-      where: {
-        userId: params.userId,
-        humanReviewOutcome: null,
-      },
-      data: {
-        humanReviewOutcome: params.action,
-        reviewedAt: new Date(),
-        reviewedByUserId: params.reviewerUserId,
-      },
-    });
   }
 
   private isGraphObservationSource(source: GlobalSpammerObservationSource): boolean {
@@ -5569,6 +5568,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     const rows = await this.prisma.spammerObservation.findMany({
       where: {
         userId,
+        source: { in: [...GLOBAL_SPAMMER_OBSERVATION_SOURCES] },
         expiresAt: {
           gt: now,
         },
@@ -5598,7 +5598,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
   ): AggregateResult {
     const sourceMap = new Map<string, AggregateSource>();
     for (const row of rows) {
-      if (row.expiresAt <= now) {
+      if (row.expiresAt <= now || !isActiveObservationSource(row.source)) {
         continue;
       }
       const reputation = sourceReputation.get(row.source);
@@ -5698,11 +5698,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     aggregate: AggregateResult,
   ): boolean {
     if (input.forceRegistry) {
-      return (
-        input.source === 'DEVELOPER_FORCED' ||
-        (input.source === 'FANOUT_HIGH' && PROMOTION_FANOUT_REASONS.has(input.reason)) ||
-        input.source === 'REVIEW_APPROVED'
-      );
+      return input.source === 'FANOUT_HIGH' && PROMOTION_FANOUT_REASONS.has(input.reason);
     }
 
     const positiveSources = aggregate.sources.filter((source) => !source.mitigating);
@@ -5730,14 +5726,12 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       PROMOTION_BEHAVIOR_SOURCES.has(source.source as GlobalSpammerObservationSource),
     );
     const hasFanoutOnlyBehavior = independentBehaviorSources.every(
-      (source) => source.source === 'FANOUT_HIGH' || source.source === 'FANOUT_REPEAT',
+      (source) =>
+        source.source === 'FANOUT_HIGH' ||
+        source.source === 'FANOUT_REPEAT' ||
+        source.source === 'GRAPH_FANOUT_PATTERN',
     );
     return independentBehaviorSources.length >= 2 && !hasFanoutOnlyBehavior;
-  }
-
-  private hasDeveloperForcedSource(sourceBreakdown: unknown): boolean {
-    const source = this.asRecord(sourceBreakdown);
-    return Boolean(source?.DEVELOPER_FORCED);
   }
 
   private async resolveLocalAdminDecision(
@@ -5916,11 +5910,10 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     status: GlobalSpammerCandidateStatus;
     reviewedByUserId: string | null;
     reviewReason: string | null;
-    registryTtlDays?: number | null;
+    detectedAt: Date;
   }): Promise<void> {
-    const now = new Date();
-    const ttlDays = Math.max(1, Math.trunc(params.registryTtlDays ?? 30));
-    const expiresAt = new Date(now.getTime() + ttlDays * DAY_MS);
+    const now = params.detectedAt;
+    const expiresAt = new Date(now.getTime() + 30 * DAY_MS);
     await this.prisma.$transaction([
       this.prisma.globalSpammer.upsert({
         where: {
@@ -5997,7 +5990,7 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     detectedAt: Date;
   }): Promise<void> {
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 30 * DAY_MS);
+    const expiresAt = new Date(params.detectedAt.getTime() + 30 * DAY_MS);
     const detectionsCount = this.resolveDenormDetectionCount(params.aggregate);
     await this.prisma.$transaction([
       this.prisma.globalSpammer.upsert({
@@ -6289,7 +6282,6 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
       aggregateScore: aggregate.score,
       confidenceLevel: aggregate.confidenceLevel,
       sourceBreakdown: aggregate.sourceBreakdown,
-      evidence: input.evidence ?? null,
     };
   }
 

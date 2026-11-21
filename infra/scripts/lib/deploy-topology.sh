@@ -402,6 +402,11 @@ maxim_topology_require_legacy_dispositions() {
   node "$(dirname "${BASH_SOURCE[0]}")/../assert-legacy-disposition-source.mjs" "$commit_sha"
 }
 
+maxim_topology_require_retired_super_ban() {
+  # FLAG: Delayed jobs, historical registry rows and cleanup intents survive rollback.
+  node "$(dirname "${BASH_SOURCE[0]}")/../assert-retired-super-ban-source.mjs" "$1"
+}
+
 maxim_topology_require_fixed_moderator() {
   local commit_sha="$1"
   # FLAG: Never restore peer takeover after an administrator fixed a moderator.
@@ -543,10 +548,14 @@ maxim_topology_require_bot_publisher_reliability() {
     infra/scripts/source-abandonment-session-host.mjs \
     infra/scripts/source-abandonment-session-inventory.mjs \
     infra/scripts/source-abandonment-session-protocol.mjs \
-    infra/scripts/source-abandonment-session-journal.mjs; do
+    infra/scripts/source-abandonment-session-journal.mjs \
+    apps/api/src/common/chat-closure-policy-change.ts; do
     if ! source="$(git show "${commit_sha}:${path}" 2>/dev/null)"; then
-      echo "Rollback target predates shared member and Publisher reliability: $path" >&2
-      return 1
+      # FLAG: Older compatible writers compare the closure fields inline.
+      if [[ "$path" != apps/api/src/common/chat-closure-policy-change.ts ]]; then
+        echo "Rollback target predates shared member and Publisher reliability: $path" >&2
+        return 1
+      fi
     fi
     sources+=("$source")
   done
@@ -572,7 +581,7 @@ maxim_topology_require_bot_publisher_reliability() {
       voiceSource, voiceGuard, voiceIngress,
       manualCommandQueue, manualCommandProcessor, manualFanoutQueue, manualFanoutProcessor,
       adminModule, liveRegistry, sessionQueueSource, sessionHost, sessionInventory,
-      sessionProtocol, sessionJournal] =
+      sessionProtocol, sessionJournal, closurePolicy] =
       require("node:fs").readFileSync(0).toString("utf8").split("\0");
     const readNamedSet = (source, name) =>
       new RegExp("const\\s+" + name + "\\b[^=;]*=\\s*new Set\\(\\s*\\[([^\\]]*)\\]\\s*\\)", "u")
@@ -638,6 +647,24 @@ maxim_topology_require_bot_publisher_reliability() {
       coldConsumers[2].includes("isSupportedSourceAbandonmentQueueInventory(value.queues.map((row) => row.name))") &&
       coldConsumers[3].includes("baseline.queueCount === baseline.queues.length") &&
       coldConsumers[3].includes("isSupportedSourceAbandonmentQueueInventory(baseline.queues.map((row) => row?.name))");
+    const closureReader = readerSource(closurePolicy);
+    const closureWriter = readerSource(settings);
+    const finalNightGuard = readerSource(nightDelivery);
+    const routeCheck = "await revalidateRoute?.(); ";
+    const aliasCheck = "await assertNoAlias(); ";
+    const stateCheck = "await this.assertCurrentTransitionState(params.chatId, params.validateBeforeDispatch); ";
+    const nightChecks = closurePolicy.trim() ? [routeCheck + aliasCheck + stateCheck] :
+      [routeCheck + stateCheck, routeCheck + stateCheck + aliasCheck];
+    const nightStateReader = nightChecks.some((checks) =>
+      ["", "withMaxFinalAuthorityCheckpoint("].some((wrapper) =>
+        finalNightGuard.includes("beforeImmediateSendMutation: " + wrapper +
+          "async (revalidateRoute) => { " + checks + "}")));
+    const closureOrderReader = closurePolicy.trim() ?
+      closureWriter.includes("if (isChatClosurePolicyChanged(previousClosure, { ...previousClosure, ...updateSettings })) { await advanceChatMutationOrder(tx, params.chatId, \u0027CHAT_CONTROL\u0027); }") &&
+      closureReader.includes("if (previous.nightModeEnabled !== candidate.nightModeEnabled) return true;") &&
+      closureReader.includes("candidate.nightModeEnabled && (previous.nightModeStartTimeMinutes !== candidate.nightModeStartTimeMinutes || previous.nightModeEndTimeMinutes !== candidate.nightModeEndTimeMinutes || previous.nightModeTimezone !== candidate.nightModeTimezone)") &&
+      closureReader.includes("const before = resolveManualChatClosure(previous, at); const after = resolveManualChatClosure(candidate, at); return before.mode !== after.mode || before.until !== after.until;")
+      : /\[\s*(?:\/\/[^\n]*\n\s*)*\u0027nightModeEnabled\u0027,\s*\u0027nightModeStartTimeMinutes\u0027,\s*\u0027nightModeEndTimeMinutes\u0027,\s*\u0027nightModeTimezone\u0027,[\s\S]*?advanceChatMutationOrder\(tx, params.chatId, \u0027CHAT_CONTROL\u0027\)/u.test(settings);
     const valid = manualReaders && coldReaders && voiceSource.includes("persistVoiceSource(") &&
       voiceSource.includes("input.kind === \u0027invalidate\u0027") &&
       voiceSource.includes("VOICE_SOURCE_LIFETIME_MS = 5 * 60_000") &&
@@ -748,8 +775,7 @@ maxim_topology_require_bot_publisher_reliability() {
       manualAuthority.includes("notice.lockToken !== input.lockToken") &&
       manualAuthority.includes("bypassCache: true") &&
       manualAuthority.includes("moderationEventId: { not: null }") &&
-      /beforeImmediateSendMutation:\s*(?:withMaxFinalAuthorityCheckpoint\(\s*)?async \(revalidateRoute\) => \{\s*await revalidateRoute\?\.\(\);\s*await this\.assertCurrentTransitionState\(/u.test(nightDelivery) &&
-      /\[\s*(?:\/\/[^\n]*\n\s*)*\u0027nightModeEnabled\u0027,\s*\u0027nightModeStartTimeMinutes\u0027,\s*\u0027nightModeEndTimeMinutes\u0027,\s*\u0027nightModeTimezone\u0027,[\s\S]*?advanceChatMutationOrder\(tx, params.chatId, \u0027CHAT_CONTROL\u0027\)/u.test(settings);
+      nightStateReader && closureOrderReader;
     process.exit(valid ? 0 : 1);
   ' >/dev/null 2>&1; then
     echo "Rollback target lacks member-effect, final-policy, manual-command readers or immutable Publisher receipt fences." >&2

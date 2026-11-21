@@ -82,7 +82,7 @@ import { chatRulesFieldsSchema } from './chat-rules-field-schemas.js';
 export { chatRulesFieldsSchema, MAX_CHAT_RULES_TEXT_LENGTH } from './chat-rules-field-schemas.js';
 import { z } from 'zod';
 import * as sectionApply from './settings-apply-error.js';
-import { addReportCommandIssues } from './report-settings.js';
+import { addReportCommandIssues, isRetiredSuperBanCommandText } from './report-settings.js';
 export * from './bot-speech.js';
 export * from './broadcast-common.js';
 export * from './chat-rules-publication.js';
@@ -1180,6 +1180,7 @@ export type GlobalSpammerReviewCandidate = z.infer<typeof globalSpammerReviewCan
 
 export const globalSpammerReviewQueueSchema = z.object({
   items: z.array(globalSpammerReviewCandidateSchema),
+  nextCursor: z.string().nullable().optional(),
   limit: z.number().int().min(1).max(100),
 });
 export type GlobalSpammerReviewQueue = z.infer<typeof globalSpammerReviewQueueSchema>;
@@ -1403,6 +1404,19 @@ export type GlobalSpammerUserDiagnostics = z.infer<typeof globalSpammerUserDiagn
 
 export const updateSettingsRequestSchema = chatSettingsSchema.superRefine((settings, context) => {
   addReportCommandIssues(settings, context);
+  for (const [key, value] of Object.entries(settings)) {
+    if (
+      /^admin.*Command(Name|Aliases)$/u.test(key) &&
+      typeof value === 'string' &&
+      value.split(/[,;\n]/u).some(isRetiredSuperBanCommandText)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: [key],
+        message: 'Выберите другое название команды.',
+      });
+    }
+  }
   if (
     settings.nightModeEnabled &&
     (settings.nightModeBotMessageEnabled || settings.nightModeOpenMessageEnabled) &&

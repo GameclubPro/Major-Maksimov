@@ -136,7 +136,13 @@ const protectedSources = [
     'apps/api/src/publisher/publisher-auto-reply-delivery.service.ts',
     'settings."auto_reply_config_revision" = delivery."auto_reply_config_revision"',
   ],
-  ['apps/api/src/admin/admin-chat-settings.ts', "'nightModeStartTimeMinutes',"],
+  ['apps/api/src/admin/admin-chat-settings.ts', 'isChatClosurePolicyChanged(previousClosure,'],
+  [
+    'apps/api/src/common/chat-closure-policy-change.ts',
+    'previous.nightModeStartTimeMinutes !== candidate.nightModeStartTimeMinutes',
+  ],
+  ['apps/api/src/common/chat-closure-policy-change.ts', 'before.until !== after.until'],
+  ['apps/api/src/moderation/night-mode-transition-delivery.service.ts', 'await assertNoAlias();'],
   [
     'apps/api/src/moderation/moderation-rule-followup-persistence.ts',
     'intent."delete_dispatch_started_at" IS NULL',

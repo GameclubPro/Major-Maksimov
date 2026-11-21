@@ -20,7 +20,13 @@ import type {
   ModerationFeedFilter,
   MembershipActivityItem,
 } from '@maxim/contracts';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  infiniteQueryOptions,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 
 import '../styles/settings-drilldown-core.css';
 import '../styles/settings-experience.css';
@@ -795,13 +801,14 @@ function resolveDiagnosticsAutoAction(diagnostics: GlobalSpammerUserDiagnostics)
     return 'Автоматическая блокировка выключена';
   }
   if (policy.registryStatus === 'LOCAL_BLOCKED') {
-    return policy.action === 'NONE' ? 'Отметка сохранена' : 'Блокировка при новом сообщении';
+    if (policy.action === 'SHADOW_DELETE_AND_KICK') return 'Наблюдение без удаления';
+    return policy.action === 'NONE' ? 'Отметка сохранена' : 'Удаление при новом сообщении';
   }
   if (policy.action === 'DELETE_AND_KICK') {
     return 'Участник будет заблокирован';
   }
   if (policy.action === 'SHADOW_DELETE_AND_KICK') {
-    return 'Ждёт решения админа';
+    return 'Наблюдение без удаления';
   }
   if (policy.registryStatus === 'ADMIN_EXEMPT') {
     return 'Без автоматической блокировки';
@@ -1045,7 +1052,7 @@ function buildDiagnosticsFacts(
   if (diagnostics.localAdminDecision) {
     const decisionLabels: Record<string, string> = {
       ALLOW: 'Не спамер',
-      BLOCK: 'Подтверждён в спам-базе',
+      BLOCK: 'Спам в ваших чатах',
       REVIEW: 'Отправить на проверку',
     };
     facts.push({
@@ -1059,12 +1066,14 @@ function buildDiagnosticsFacts(
 
 function GlobalSpammerReviewPanel({
   candidates,
+  hasMore,
   isLoading,
   error,
   onOpen,
   onWarm,
 }: {
   candidates: GlobalSpammerReviewCandidate[];
+  hasMore: boolean;
   isLoading: boolean;
   error: unknown;
   onOpen: () => void;
@@ -1073,12 +1082,14 @@ function GlobalSpammerReviewPanel({
   const errorMessage = error ? normalizeLoadErrorMessage(error) : null;
   const visibleCandidates = candidates.slice(0, 3);
   const hiddenCandidateCount = Math.max(0, candidates.length - visibleCandidates.length);
-  const pendingLabel = `${candidates.length} ${formatRussianCountLabel(
-    candidates.length,
-    'кандидат',
-    'кандидата',
-    'кандидатов',
-  )} на проверке`;
+  const pendingLabel = hasMore
+    ? 'На проверке: ' + candidates.length + '+'
+    : `${candidates.length} ${formatRussianCountLabel(
+        candidates.length,
+        'кандидат',
+        'кандидата',
+        'кандидатов',
+      )} на проверке`;
   const statusLabel = errorMessage ? 'Ошибка загрузки' : isLoading ? 'Обновляем' : pendingLabel;
   const shouldHide = !isLoading && !errorMessage && candidates.length === 0;
   if (shouldHide) {
@@ -1131,6 +1142,10 @@ function GlobalSpammerReviewPanel({
 
 function SpammerReviewSheet({
   open,
+  hasMore,
+  loadingMore,
+  loadMoreError,
+  onLoadMore,
   candidates,
   isLoading,
   isRefreshing,
@@ -1141,6 +1156,10 @@ function SpammerReviewSheet({
   onWarmDiagnostics,
 }: {
   open: boolean;
+  hasMore: boolean;
+  loadingMore: boolean;
+  loadMoreError: boolean;
+  onLoadMore: () => void;
   candidates: GlobalSpammerReviewCandidate[];
   isLoading: boolean;
   isRefreshing: boolean;
@@ -1151,8 +1170,9 @@ function SpammerReviewSheet({
   onWarmDiagnostics?: (candidate: GlobalSpammerReviewCandidate) => void;
 }) {
   const errorMessage = error ? normalizeLoadErrorMessage(error) : null;
-  const summary =
-    candidates.length > 0
+  const summary = hasMore
+    ? 'На проверке: ' + candidates.length + '+'
+    : candidates.length > 0
       ? `${candidates.length} ${formatRussianCountLabel(
           candidates.length,
           'кандидат',
@@ -1237,6 +1257,16 @@ function SpammerReviewSheet({
               </button>
             );
           })}
+          {hasMore ? (
+            <button
+              type="button"
+              className="button button--ghost"
+              disabled={loadingMore}
+              onClick={onLoadMore}
+            >
+              {loadingMore ? 'Загружаем…' : loadMoreError ? 'Повторить загрузку' : 'Показать ещё'}
+            </button>
+          ) : null}
         </div>
       )}
     </SettingsDrilldownPanel>
@@ -1296,6 +1326,7 @@ function SpammerDiagnosticsSheet({
   const canShowShell = Boolean(target || diagnostics);
   const canShowError = Boolean(errorMessage && !diagnostics);
   const isSignalsLoading = isLoading || isLoadingDetails;
+  const detailsUnavailable = Boolean(errorMessage && diagnostics && !isSignalsLoading);
   const isReviewing = Boolean(reviewingAction);
   const isActionBusy = isReviewing || isBanning;
   const footer = diagnostics ? (
@@ -1372,9 +1403,9 @@ function SpammerDiagnosticsSheet({
             <p id="spammer-review-help" className="channel-settings-hint-popover" role="note">
               Оценка основана на замеченных повторах, рассылках и блокировках. Это не доказательство
               нарушения. «Не спам» исключает участника из этой проверки, но не снимает ограничения в
-              чате. «Подтвердить спам» сохраняет ваше решение без немедленного удаления. Дальнейшие
-              действия зависят от настроек защиты чата. Для блокировки выберите «Бан» и подтвердите,
-              в каких чатах она нужна.
+              чате. «Подтвердить спам» сохраняет ваше решение для чатов, где вы администратор, без
+              немедленного удаления. Дальнейшие действия зависят от настроек защиты чата. Для
+              блокировки выберите «Бан» и подтвердите, в каких чатах она нужна.
             </p>
           ) : null}
         </span>
@@ -1510,14 +1541,20 @@ function SpammerDiagnosticsSheet({
             <div className="spammer-diagnostics__section-head">
               <span>Причины проверки</span>
               <strong>
-                {signalCount > 0
-                  ? formatDiagnosticsSignalCount(signalCount)
-                  : isSignalsLoading
-                    ? 'Загружаем'
-                    : 'Признаков нет'}
+                {detailsUnavailable
+                  ? 'Не удалось обновить'
+                  : signalCount > 0
+                    ? formatDiagnosticsSignalCount(signalCount)
+                    : isSignalsLoading
+                      ? 'Загружаем'
+                      : 'Признаков нет'}
               </strong>
             </div>
-            {signalGroups.length > 0 ? (
+            {detailsUnavailable ? (
+              <button type="button" className="button button--ghost" onClick={onRetry}>
+                Повторить загрузку
+              </button>
+            ) : signalGroups.length > 0 ? (
               <div className="spammer-diagnostics__signal-list">
                 {signalGroups.map((group) => {
                   return (
@@ -2091,17 +2128,39 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
     chatId,
     ...SPAMMER_REVIEW_QUEUE_SCOPE,
   );
-  const spammerReviewQueueQuery = useQuery({
+  const spammerReviewQueueOptions = infiniteQueryOptions({
     queryKey: spammerReviewQueueKey,
-    queryFn: ({ signal }) =>
-      getGlobalSpammerReviewQueue(api, chatId ?? '', SPAMMER_REVIEW_QUEUE_QUERY, { signal }),
-    enabled:
-      Boolean(chatId) && ((section === 'moderation' && !isSanctionsView) || spammerReviewOpen),
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) =>
+      getGlobalSpammerReviewQueue(
+        api,
+        chatId ?? '',
+        {
+          ...SPAMMER_REVIEW_QUEUE_QUERY,
+          ...(pageParam ? { cursor: pageParam } : {}),
+        },
+        { signal },
+      ),
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
     staleTime: 60_000,
     gcTime: 10 * 60_000,
-    placeholderData: (previousData) => previousData,
     refetchOnWindowFocus: false,
   });
+  const spammerReviewQueueQuery = useInfiniteQuery({
+    ...spammerReviewQueueOptions,
+    enabled:
+      Boolean(chatId) && ((section === 'moderation' && !isSanctionsView) || spammerReviewOpen),
+  });
+  const spammerCandidates = useMemo(
+    () => [
+      ...new Map(
+        spammerReviewQueueQuery.data?.pages.flatMap((page) =>
+          page.items.map((candidate) => [candidate.userId, candidate] as const),
+        ) ?? [],
+      ).values(),
+    ],
+    [spammerReviewQueueQuery.data],
+  );
   const spammerDiagnosticsUserId = spammerDiagnosticsTarget?.userId.trim() || null;
   const spammerDiagnosticsLightQuery = useQuery({
     queryKey: queryKeys.globalSpammerUserDiagnostics(
@@ -2165,9 +2224,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
     spammerDiagnosticsFullEnabledFor !== spammerDiagnosticsUserId,
   );
   const spammerDiagnosticsError =
-    spammerDiagnosticsFullQuery.error && spammerDiagnostics
-      ? spammerDiagnosticsLightQuery.error
-      : (spammerDiagnosticsFullQuery.error ?? spammerDiagnosticsLightQuery.error);
+    spammerDiagnosticsFullQuery.error ?? spammerDiagnosticsLightQuery.error;
   const isSpammerDiagnosticsLoading =
     Boolean(spammerDiagnosticsTarget) &&
     !spammerDiagnostics &&
@@ -2395,42 +2452,19 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
         action,
         ...(reason ? { reason } : {}),
       }),
-    onMutate: async ({ userId }) => {
-      const reviewedUserId = userId.trim();
-      await queryClient.cancelQueries({ queryKey: spammerReviewQueueKey });
-      const previousQueue =
-        queryClient.getQueryData<Awaited<ReturnType<typeof getGlobalSpammerReviewQueue>>>(
-          spammerReviewQueueKey,
-        );
-      queryClient.setQueryData(
-        spammerReviewQueueKey,
-        (current: Awaited<ReturnType<typeof getGlobalSpammerReviewQueue>> | undefined) =>
-          current
-            ? {
-                ...current,
-                items: current.items.filter((item) => item.userId !== reviewedUserId),
-              }
-            : current,
-      );
-      return { previousQueue };
-    },
     onSuccess: (result) => {
       if (spammerDiagnosticsTarget?.userId === result.userId) {
         setSpammerDiagnosticsTarget(null);
       }
       pushToast({
         tone: 'success',
-        title:
-          result.status === 'SUPPRESSED' ? 'Не учитывается в спам-базе' : 'Подтверждён в спам-базе',
+        title: result.status === 'SUPPRESSED' ? 'Вы отметили «Не спам»' : 'Вы отметили «Спам»',
       });
       void queryClient.invalidateQueries({
         queryKey: queryKeys.globalSpammerUserDiagnostics(chatId, result.userId),
       });
     },
-    onError: (error: unknown, _variables, context) => {
-      if (context?.previousQueue) {
-        queryClient.setQueryData(spammerReviewQueueKey, context.previousQueue);
-      }
+    onError: (error: unknown) => {
       pushToast({
         tone: 'danger',
         title: 'Не удалось сохранить решение',
@@ -2627,13 +2661,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
     if (!chatId) {
       return;
     }
-    void queryClient.prefetchQuery({
-      queryKey: spammerReviewQueueKey,
-      queryFn: ({ signal }) =>
-        getGlobalSpammerReviewQueue(api, chatId, SPAMMER_REVIEW_QUEUE_QUERY, { signal }),
-      staleTime: 60_000,
-      gcTime: 10 * 60_000,
-    });
+    void queryClient.prefetchInfiniteQuery(spammerReviewQueueOptions);
   };
   const prefetchSpammerDiagnosticsShell = (target: SpammerDiagnosticsTarget) => {
     const targetUserId = target.userId.trim();
@@ -3200,9 +3228,10 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
       {section === 'moderation' && !isSanctionsView ? (
         <>
           <GlobalSpammerReviewPanel
-            candidates={spammerReviewQueueQuery.data?.items ?? []}
+            candidates={spammerCandidates}
+            hasMore={spammerReviewQueueQuery.hasNextPage}
             isLoading={spammerReviewQueueQuery.isLoading && !spammerReviewQueueQuery.data}
-            error={spammerReviewQueueQuery.error}
+            error={spammerCandidates.length ? null : spammerReviewQueueQuery.error}
             onOpen={() => setSpammerReviewOpen(true)}
             onWarm={prefetchSpammerReviewQueue}
           />
@@ -3499,10 +3528,16 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
 
       <SpammerReviewSheet
         open={spammerReviewOpen}
-        candidates={spammerReviewQueueQuery.data?.items ?? []}
+        loadingMore={spammerReviewQueueQuery.isFetchingNextPage}
+        loadMoreError={spammerReviewQueueQuery.isFetchNextPageError}
+        onLoadMore={() => {
+          void spammerReviewQueueQuery.fetchNextPage();
+        }}
+        candidates={spammerCandidates}
+        hasMore={spammerReviewQueueQuery.hasNextPage}
         isLoading={spammerReviewQueueQuery.isLoading && !spammerReviewQueueQuery.data}
         isRefreshing={spammerReviewQueueQuery.isFetching && Boolean(spammerReviewQueueQuery.data)}
-        error={spammerReviewQueueQuery.error}
+        error={spammerCandidates.length ? null : spammerReviewQueueQuery.error}
         onClose={() => setSpammerReviewOpen(false)}
         onRetry={handleSpammerReviewRetry}
         onOpenDiagnostics={handleSpammerCandidateDiagnostics}

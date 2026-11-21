@@ -281,9 +281,6 @@ export type AdminForwardedModerationCommand =
       fanoutAllChats?: boolean;
     }
   | {
-      action: 'SUPER_BAN';
-    }
-  | {
       action: 'MUTE';
       fanoutAllChats?: boolean;
       muteDurationHours?: number;
@@ -475,7 +472,6 @@ export const GLOBAL_SPAMMER_EXEMPTION_CACHE_TTL_MS = 60_000;
 export const GLOBAL_SPAMMER_EXEMPTION_HOT_PATH_TIMEOUT_MS = 350;
 export const GLOBAL_SPAMMER_EXEMPTION_HOT_PATH_MAX_ADMIN_IDS = 500;
 export const GLOBAL_SPAMMER_TRACK_HOT_PATH_TIMEOUT_MS = 350;
-export const DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS = 350;
 export const MODERATION_ACTION_ACCESS_LOSS_HOT_PATH_TIMEOUT_MS = 500;
 export const MODERATION_ACTION_DISPATCH_TIMEOUT_MS = 2_000;
 export const GLOBAL_SPAMMER_HIGH_FANOUT_MIN_CHATS = 6;

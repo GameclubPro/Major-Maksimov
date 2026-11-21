@@ -951,10 +951,12 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     },
   });
   const spammerReviewMetricsQuery = useQuery({
-    queryKey: ['global-spammer-review-metrics', chatId, 'summary'],
+    queryKey: ['global-spammer-review-metrics', chatId, 'mode'],
     queryFn: ({ signal }) =>
-      getGlobalSpammerReviewMetrics(api, chatId ?? '', { mode: 'summary' }, { signal }),
-    enabled: Boolean(chatId) && Boolean(settingsScreenQuery.data),
+      getGlobalSpammerReviewMetrics(api, chatId ?? '', { mode: 'mode' }, { signal }),
+    enabled:
+      Boolean(chatId && draft?.deleteSpammersEnabled) &&
+      (expandedSections.limits || focusSection === 'limits'),
     staleTime: 30_000,
     refetchOnWindowFocus: false,
   });
@@ -3717,9 +3719,13 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
   ].filter(Boolean).length;
   const deleteSpammersRuntimeStatus = !draft?.deleteSpammersEnabled
     ? 'Выкл'
-    : spammerReviewMetricsQuery.data?.enforcementMode === 'shadow'
-      ? 'Проверка'
-      : 'Активно';
+    : spammerReviewMetricsQuery.isError
+      ? 'Режим неизвестен'
+      : spammerReviewMetricsQuery.data?.enforcementMode === 'shadow'
+        ? 'Наблюдение'
+        : spammerReviewMetricsQuery.data?.enforcementMode === 'enforce'
+          ? 'Активно'
+          : 'Уточняем режим';
   const extraHeaderSummary = extraEnabledCount > 0 ? `Включено: ${extraEnabledCount}` : 'Выключено';
   const extraCardStatus = extraEnabledCount > 0 ? `${extraEnabledCount}` : 'Выкл';
   const storefrontHeaderSummary = draft?.karavanStorefrontEnabled
@@ -5193,7 +5199,9 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
           },
           limitsRuntime: {
             deleteSpammersStatus: deleteSpammersRuntimeStatus,
-            enforcementMode: spammerReviewMetricsQuery.data?.enforcementMode,
+            enforcementMode: spammerReviewMetricsQuery.isError
+              ? undefined
+              : spammerReviewMetricsQuery.data?.enforcementMode,
           },
           navigationAllowlist: singleNavigationAllowlist,
           linkRules:
@@ -5975,7 +5983,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   renderSectionSaveFooter={renderSectionSaveFooter}
                   setFieldValue={setFieldValue}
                   setOpenBotEditorKey={setOpenBotEditorKey}
-                  spammerReviewMetricsQuery={spammerReviewMetricsQuery}
                   toggleBotMessageEditor={toggleBotMessageEditor}
                   toggleHint={toggleHint}
                   toggleSection={toggleSection}

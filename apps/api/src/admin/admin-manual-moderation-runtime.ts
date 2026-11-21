@@ -53,7 +53,6 @@ import {
   type AdminManualGroupModerationCommandJob,
   type AdminManualMuteFanoutJob,
 } from './admin-manual-fanout.queue';
-import type { AdminSuperBanJob } from './admin-super-ban.queue';
 import { formatManualModerationUserLabel } from './manual-moderation-notice.util';
 import { ManualGroupCommandNoticeAuthorityRejectedError } from './admin-manual-group-command-notice-authority';
 import type {
@@ -69,7 +68,6 @@ import {
   ADMIN_ACTION_HEALTH_LANE,
   ADMIN_MANUAL_FANOUT_QUEUE_PRIORITY,
   ADMIN_MANUAL_GROUP_COMMAND_QUEUE_PRIORITY,
-  ADMIN_SUPER_BAN_QUEUE_PRIORITY,
   DEFAULT_GROUP_COMMAND_MUTE_DURATION_HOURS,
   type AdminActionSource,
   type ManualBanFollowUpSource,
@@ -131,10 +129,6 @@ export type ManualMuteFanoutTargetPreparation =
 export class AdminManualModerationRuntime {
   constructor(private readonly context: AdminManualModerationRuntimeContext) {}
 
-  private get adminSuperBanQueue() {
-    return this.context.adminSuperBanQueue;
-  }
-
   private get adminManualFanoutQueue() {
     return this.context.adminManualFanoutQueue;
   }
@@ -155,14 +149,6 @@ export class AdminManualModerationRuntime {
 
   private isKnownRuntimeBotUserId(userId: string | null | undefined): boolean {
     return this.context.isKnownRuntimeBotUserId(userId);
-  }
-
-  private isSuperBanDeveloperUserId(userId: string | null | undefined): boolean {
-    return this.context.isSuperBanDeveloperUserId(userId);
-  }
-
-  private processDeveloperSuperBanJob(job: AdminSuperBanJob): Promise<void> {
-    return this.context.processDeveloperSuperBanJob(job);
   }
 
   async fanoutGroupMuteAfterNotice(
@@ -203,72 +189,6 @@ export class AdminManualModerationRuntime {
   }): Promise<boolean> {
     const job = this.buildManualGroupModerationCommandJob(params);
     return this.enqueueManualModerationFanoutViaContext(job);
-  }
-
-  async enqueueDeveloperSuperBanCommand(params: {
-    sourceChatId: string;
-    commandBotId?: string | null;
-    targetUserId: string;
-    targetSenderName?: string | null;
-    targetMessageId?: string | null;
-    commandMessageId: string;
-    actor: AuthUser;
-    deleteBotMessagesEnabled: boolean;
-    deleteBotMessagesDelayMinutes: number;
-  }): Promise<boolean> {
-    if (!this.isSuperBanDeveloperUserId(params.actor.userId)) {
-      throw new ForbiddenException(
-        'Недостаточно прав: команду `супер бан` может запускать только разработчик бота.',
-      );
-    }
-
-    if (this.isKnownRuntimeBotUserId(params.targetUserId)) {
-      throw new BadRequestException(
-        'Команда `супер бан` отклонена: настроенные боты MAX защищены от блокировки.',
-      );
-    }
-
-    const job = this.buildDeveloperSuperBanCommandJob(params);
-    if (!this.adminSuperBanQueue) {
-      void this.processDeveloperSuperBanJob(job).catch((error: unknown) => {
-        this.logger.warn(
-          {
-            jobId: job.jobId,
-            sourceChatId: job.sourceChatId,
-            targetUserId: job.targetUserId,
-            err: error instanceof Error ? error.message : String(error),
-          },
-          'Failed to process developer super ban without queue',
-        );
-      });
-      return true;
-    }
-
-    try {
-      await this.adminSuperBanQueue.add('execute-admin-super-ban', job, {
-        jobId: job.jobId,
-        priority: ADMIN_SUPER_BAN_QUEUE_PRIORITY,
-        attempts: 5,
-        removeOnComplete: true,
-        removeOnFail: false,
-        backoff: {
-          type: 'exponential',
-          delay: 1_000,
-        },
-      });
-      return true;
-    } catch (error: unknown) {
-      this.logger.warn(
-        {
-          jobId: job.jobId,
-          sourceChatId: job.sourceChatId,
-          targetUserId: job.targetUserId,
-          err: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to enqueue developer super ban command',
-      );
-      return false;
-    }
   }
 
   buildManualGroupModerationCommandJob(params: {
@@ -318,44 +238,6 @@ export class AdminManualModerationRuntime {
     };
   }
 
-  buildDeveloperSuperBanCommandJob(params: {
-    sourceChatId: string;
-    commandBotId?: string | null;
-    targetUserId: string;
-    targetSenderName?: string | null;
-    targetMessageId?: string | null;
-    commandMessageId: string;
-    actor: AuthUser;
-    deleteBotMessagesEnabled: boolean;
-    deleteBotMessagesDelayMinutes: number;
-  }): AdminSuperBanJob {
-    return {
-      kind: 'developer_super_ban',
-      jobId: this.buildDeveloperSuperBanCommandJobId(
-        params.sourceChatId,
-        params.commandMessageId,
-        params.targetUserId,
-      ),
-      sourceChatId: params.sourceChatId,
-      commandBotId: readTrimmedString(params.commandBotId),
-      targetUserId: params.targetUserId,
-      targetSenderName: params.targetSenderName ?? null,
-      targetMessageId: params.targetMessageId ?? null,
-      commandMessageId: params.commandMessageId,
-      actor: {
-        userId: params.actor.userId,
-        username: params.actor.username ?? null,
-        displayName: params.actor.displayName ?? null,
-        chatId: params.actor.chatId ?? null,
-        chatTitle: params.actor.chatTitle ?? null,
-      },
-      deleteBotMessagesEnabled: params.deleteBotMessagesEnabled,
-      deleteBotMessagesDelayMinutes: params.deleteBotMessagesDelayMinutes,
-      retryPolicyName: 'manual-fanout',
-      createdAt: new Date().toISOString(),
-    };
-  }
-
   buildManualGroupModerationCommandJobId(
     sourceChatId: string,
     commandMessageId: string,
@@ -372,18 +254,6 @@ export class AdminManualModerationRuntime {
       .digest('hex')
       .slice(0, 32);
     return `manual_group_moderation_command__${digest}`;
-  }
-
-  buildDeveloperSuperBanCommandJobId(
-    sourceChatId: string,
-    commandMessageId: string,
-    targetUserId: string,
-  ): string {
-    const digest = createHash('sha256')
-      .update(`${sourceChatId}\n${commandMessageId}\n${targetUserId}\ndeveloper_super_ban`)
-      .digest('hex')
-      .slice(0, 32);
-    return `developer_super_ban__${digest}`;
   }
 
   async processManualModerationFanoutJob(job: AdminManualFanoutJob): Promise<void> {

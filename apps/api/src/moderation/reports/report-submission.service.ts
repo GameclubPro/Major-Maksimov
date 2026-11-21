@@ -1,5 +1,5 @@
 import { Injectable, Optional } from '@nestjs/common';
-import { REPORT_DEFAULT_TRIGGERS, type MaxUpdate, type ReportSettings } from '@maxim/contracts';
+import type { MaxUpdate, ReportSettings } from '@maxim/contracts';
 import { MaxClientService } from '../../max/max-client.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ModerationDeleteIntentService } from '../moderation-delete-intent.service';
@@ -9,6 +9,7 @@ import { ReportStateService } from './report-state.service';
 import { ReportTelemetryService } from './report-telemetry.service';
 import {
   isEligibleReporter,
+  matchesReportTrigger,
   record,
   REPORT_COMMAND_RULE,
   REPORT_DAY_MS,
@@ -49,9 +50,7 @@ export class ReportSubmissionService {
     if (
       !settings.reportsEnabled ||
       update.type !== 'message_created' ||
-      ![...REPORT_DEFAULT_TRIGGERS, ...settings.reportsAliases].includes(
-        message.text.trim().toLowerCase(),
-      )
+      !matchesReportTrigger(message.text, settings.reportsAliases)
     )
       return false;
     const botId = update.botId;

@@ -842,7 +842,6 @@ queues=(
   admin-suggestion-delivery
   admin-manual-fanout
   admin-manual-commands
-  admin-super-ban
   publisher-binding-refresh
   publisher-chat-comments
   publisher-auto-replies

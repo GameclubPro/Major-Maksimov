@@ -94,8 +94,6 @@ import { AdminManualMessageCleanupService } from './admin-manual-message-cleanup
 import { AdminSuggestionDeliveryProcessor } from './admin-suggestion-delivery.processor';
 import { ADMIN_SUGGESTION_DELIVERY_QUEUE } from './admin-suggestion-delivery.queue';
 import { AdminSuggestionDeliveryRecoveryService } from './admin-suggestion-delivery-recovery.service';
-import { AdminSuperBanProcessor } from './admin-super-ban.processor';
-import { ADMIN_SUPER_BAN_QUEUE } from './admin-super-ban.queue';
 import { AdminDialogController } from './admin-dialog.controller';
 import { PublisherCommentAuthorProfileController } from './publisher-comment-author-profile.controller';
 import { AdminGiveawayController } from './admin-giveaway.controller';
@@ -230,7 +228,6 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     ...registerRuntimeQueues(ADMIN_MANAGED_ENTITIES_REFRESH_QUEUE),
     ...registerRuntimeQueues(ADMIN_MANUAL_FANOUT_QUEUE),
     ...registerRuntimeQueues(ADMIN_MANUAL_COMMAND_QUEUE),
-    ...registerRuntimeQueues(ADMIN_SUPER_BAN_QUEUE),
     ...registerRuntimeQueues(ADMIN_SUGGESTION_DELIVERY_QUEUE),
     ...registerRuntimeQueues(VK_PARSING_SYNC_QUEUE),
     ...registerRuntimeQueues(VK_PARSING_PUBLISHER_QUEUE),
@@ -453,7 +450,6 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     ...(roleRunsAction(getAppRole()) ? [AdminManagedEntitiesRefreshProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminManualFanoutProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminManualCommandProcessor] : []),
-    ...(roleRunsAction(getAppRole()) ? [AdminSuperBanProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminSuggestionDeliveryProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminSuggestionDeliveryRecoveryService] : []),
   ],

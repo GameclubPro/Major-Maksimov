@@ -1030,6 +1030,18 @@ describe('ModerationService chat admin access lookups', () => {
 
     expect(first).toEqual(new Set(['user-1']));
     expect(second).toEqual(new Set());
+    // A sequential read of the same negative result must not require another SQL lookup.
+    await expect(
+      (
+        service as unknown as {
+          resolveGlobalSpammerExemptUserIds: (
+            users: string[],
+            admins: string[],
+            options: { chatId: string },
+          ) => Promise<Set<string>>;
+        }
+      ).resolveGlobalSpammerExemptUserIds(['user-2'], ['admin-1'], { chatId: 'chat-1' }),
+    ).resolves.toEqual(new Set());
     expect(prisma.adminGlobalSpammerExemption.findMany).toHaveBeenCalledTimes(1);
     expect(prisma.adminGlobalSpammerExemption.findMany).toHaveBeenCalledWith(
       expect.objectContaining({

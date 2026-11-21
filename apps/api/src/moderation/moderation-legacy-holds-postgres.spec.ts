@@ -10,7 +10,6 @@ import { MessageRetentionStore } from '../message-retention/message-retention-st
 import type { MessageDuplicateBinding } from './message-duplicate/message-duplicate-state';
 import { measureLegacyRecoverySqlPlan } from '../scripts/legacy-recovery-live-sql';
 import { buildActiveMuteStateKey } from './moderation-state.util';
-import { buildDeveloperForcedGlobalSpammerCacheKey } from './developer-forced-global-spammer-cache';
 import { ModerationRuleSanctionRejectedError } from './moderation-rule-sanction-guard.service';
 import {
   bindMessageLimitEvidence,
@@ -437,11 +436,9 @@ describeStores('native permanent legacy effect holds', () => {
     const { s, chatId, otherChatId } = await fixture();
     const userId = `held-cached-global-${randomUUID()}`;
     globalUsers.push(userId);
-    const cacheKey = buildDeveloperForcedGlobalSpammerCacheKey(userId);
+    const cacheKey = `global-spammer:developer-forced:${userId}`;
     globalCacheKeys.push(cacheKey);
     await s.redis.set(cacheKey, '1', 'EX', 3600);
-    (s.moderation as any).developerForcedGlobalSpammerMemoryCache.set(userId, Date.now() + 60_000);
-    expect(await (s.moderation as any).isDeveloperForcedGlobalSpammerCached(userId)).toBe(true);
     const messageId = `queued-global-${randomUUID()}`;
     const source = update(s, otherChatId, messageId, userId);
     const pending = await s.intents.ensureIntent({
@@ -465,7 +462,6 @@ describeStores('native permanent legacy effect holds', () => {
       },
     });
     await installFixtureHold(s, chatId, `held-source-${randomUUID()}`, userId);
-    expect(await (s.moderation as any).isDeveloperForcedGlobalSpammerCached(userId)).toBe(false);
     expect(
       await (s.moderation as any).deleteAndKickDetectedGlobalSpammer({
         chatId: otherChatId,

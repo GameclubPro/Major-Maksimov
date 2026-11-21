@@ -9,7 +9,6 @@ import {
   WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MAX_LIFETIME_MS,
   WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_PERSIST_RETRY_MS,
   WEBHOOK_HOT_PATH_TIMEOUT_TERMINAL_QUARANTINE_PREFIX,
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS,
   GLOBAL_SPAMMER_CONFIRMED_FANOUT_EPISODE_THRESHOLD,
   GLOBAL_SPAMMER_EXEMPTION_HOT_PATH_TIMEOUT_MS,
   GLOBAL_SPAMMER_EXEMPTION_HOT_PATH_MAX_ADMIN_IDS,
@@ -3698,6 +3697,7 @@ describe('ModerationService', () => {
     const prisma = {
       globalSpammer: {
         upsert: jest.fn().mockResolvedValue({}),
+        findFirst: jest.fn().mockResolvedValue({ sourceBreakdown: { FANOUT_HIGH: { score: 1 } } }),
       },
       moderationEvent: {
         create: jest.fn(),
@@ -3761,9 +3761,7 @@ describe('ModerationService', () => {
         added: true,
         size: GLOBAL_SPAMMER_HIGH_FANOUT_MIN_CHATS,
       });
-      for (let i = 0; i < 10; i += 1) {
-        await Promise.resolve();
-      }
+      await jest.advanceTimersByTimeAsync(0);
 
       expect(prisma.globalSpammer.upsert).toHaveBeenCalledTimes(1);
       expect(maxClient.deleteMessage).not.toHaveBeenCalled();
@@ -3929,78 +3927,6 @@ describe('ModerationService', () => {
       );
     } finally {
       debugSpy.mockRestore();
-    }
-  });
-
-  it('fails open when developer-forced global spammer cache lookup exceeds the hot-path budget', async () => {
-    jest.useFakeTimers();
-    const runtimeDiagnosticsService = {
-      recordHotPathStageOutcome: jest.fn(),
-    };
-    const cacheLookupGate = createDeferred<string | null>();
-    const redisCounter = {
-      getString: jest.fn(() => cacheLookupGate.promise),
-    };
-    const service = new ModerationService(
-      { globalSpammer: { findFirst: jest.fn().mockResolvedValue(null) } } as never,
-      { detect: jest.fn() } as never,
-      { resolveAction: jest.fn() } as never,
-      {} as never,
-      undefined,
-      undefined,
-      undefined,
-      redisCounter as never,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      runtimeDiagnosticsService as never,
-    );
-    const debugSpy = jest
-      .spyOn((service as any).logger, 'debug')
-      .mockImplementation(() => undefined);
-    const resolveCachedSpammer = jest.spyOn(service as any, 'isDeveloperForcedGlobalSpammerCached');
-
-    try {
-      const resultPromise = (service as any).isDeveloperForcedGlobalSpammerCachedWithHotPathBudget(
-        'user-1',
-        {
-          chatId: 'chat-1',
-          messageId: 'message-1',
-        },
-      );
-
-      await jest.advanceTimersByTimeAsync(0);
-      expect(redisCounter.getString).toHaveBeenCalledTimes(1);
-      await jest.advanceTimersByTimeAsync(DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS);
-
-      await expect(resultPromise).resolves.toBe(false);
-      expect(runtimeDiagnosticsService.recordHotPathStageOutcome).toHaveBeenCalledWith({
-        stage: 'developer-forced-global-spammer.budget',
-        outcome: 'timeout',
-        failOpen: true,
-      });
-      expect(debugSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          chatId: 'chat-1',
-          userId: 'user-1',
-          messageId: 'message-1',
-          timeoutMs: DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS,
-        }),
-        'Developer-forced global spammer lookup exceeded hot-path budget; continuing fail-open',
-      );
-    } finally {
-      cacheLookupGate.resolve(null);
-      const cacheLookupResult = resolveCachedSpammer.mock.results[0];
-      if (cacheLookupResult?.type === 'return') {
-        await cacheLookupResult.value;
-      }
-      resolveCachedSpammer.mockRestore();
-      debugSpy.mockRestore();
-      jest.useRealTimers();
     }
   });
 });

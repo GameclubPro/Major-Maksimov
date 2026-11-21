@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { REPORT_DEFAULT_TRIGGERS, type MaxUpdate, type ReportSettings } from '@maxim/contracts';
+import {
+  isRetiredSuperBanCommandText,
+  REPORT_DEFAULT_TRIGGERS,
+  type MaxUpdate,
+  type ReportSettings,
+} from '@maxim/contracts';
 import { extractRawMessageNode } from '../moderation-update-extractors';
 
 export const REPORT_DAY_MS = 86_400_000;
@@ -61,13 +66,20 @@ export function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+export function matchesReportTrigger(text: string, aliases: readonly string[]): boolean {
+  const normalized = text.trim().toLowerCase();
+  return (
+    !isRetiredSuperBanCommandText(normalized) &&
+    [...REPORT_DEFAULT_TRIGGERS, ...aliases].includes(normalized)
+  );
+}
+
 export function reportReplyTarget(
   update: MaxUpdate,
   settings: Pick<ReportSettings, 'reportsEnabled' | 'reportsAliases'>,
 ): string | null {
   if (update.type !== 'message_created' || !update.message || !settings.reportsEnabled) return null;
-  const text = update.message.text.trim().toLowerCase();
-  if (![...REPORT_DEFAULT_TRIGGERS, ...settings.reportsAliases].includes(text)) return null;
+  if (!matchesReportTrigger(update.message.text, settings.reportsAliases)) return null;
   const node = extractRawMessageNode(record(update.raw));
   const body = record(node?.body);
   if (

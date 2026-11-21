@@ -377,13 +377,7 @@ import {
   extractMaxCallbackPayloadRaw,
   extractMaxCallbackUserId,
 } from './max-callback-update.util';
-import {
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_CACHE_TTL_SEC,
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_MEMORY_CACHE_TTL_MS,
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_WARM_MARKER_TTL_SEC,
-  buildDeveloperForcedGlobalSpammerCacheKey,
-  buildDeveloperForcedGlobalSpammerWarmMarkerKey,
-} from './developer-forced-global-spammer-cache';
+import { hasActiveRegistryProvenance } from './global-spammer-provenance';
 import { RedisCounterService } from './redis-counter.service';
 import type {
   DuplicateAction,
@@ -592,7 +586,6 @@ import {
   GLOBAL_SPAMMER_EXEMPTION_HOT_PATH_TIMEOUT_MS,
   GLOBAL_SPAMMER_EXEMPTION_HOT_PATH_MAX_ADMIN_IDS,
   GLOBAL_SPAMMER_TRACK_HOT_PATH_TIMEOUT_MS,
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS,
   MODERATION_ACTION_ACCESS_LOSS_HOT_PATH_TIMEOUT_MS,
   MODERATION_ACTION_DISPATCH_TIMEOUT_MS,
   MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
@@ -717,9 +710,7 @@ type ManualModerationCommandBridge = Pick<
   | 'applyManualModerationAction'
   | 'applyManualChatSilenceCommand'
   | 'applyManualOpenChatCommand'
-  | 'enqueueDeveloperSuperBanCommand'
   | 'enqueueManualGroupModerationCommand'
-  | 'isSuperBanDeveloperUserId'
 >;
 
 type ApplySanctionActionParams = {
@@ -858,9 +849,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     Promise<Set<string>>
   >();
   private readonly globalSpammerLocalChatObservations = new Map<string, number>();
-  private readonly developerForcedGlobalSpammerMemoryCache = new Map<string, number>();
-  private developerForcedGlobalSpammerWarmUntilMs = 0;
-  private developerForcedGlobalSpammerWarmInFlight: Promise<void> | null = null;
   private readonly globalSpammerRegistryTtlMs = 30 * 24 * 60 * 60 * 1000;
   private readonly globalSpammerExemptionCache = new Map<
     string,
@@ -1296,14 +1284,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       );
     }
     return this.webhookCanonicalExecutionServiceInstance;
-  }
-
-  private isSuperBanDeveloperUserId(userId: string | null | undefined): boolean {
-    const bridge = this.manualModerationCommandBridge;
-    return (
-      typeof bridge?.isSuperBanDeveloperUserId === 'function' &&
-      bridge.isSuperBanDeveloperUserId(userId) === true
-    );
   }
 
   private createNightModeTransitionHooks() {
@@ -1991,58 +1971,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         await this.messageDuplicateService?.revokeActions?.(update);
         await enqueueCommercialOcr(false);
       };
-
-      if (
-        messageId &&
-        this.isSuperBanDeveloperUserId(senderId) &&
-        (await this.handleAdminForwardedModerationCommand({
-          update,
-          chatId,
-          senderId,
-          messageId,
-          settings,
-          superBanOnly: true,
-          ...(chatTitle !== undefined ? { chatTitle } : {}),
-          ...(senderName !== undefined ? { senderName } : {}),
-        }))
-      ) {
-        await suppressDeferredPhotoAnalysisActions();
-        return;
-      }
-
-      this.markWebhookHotPathStage(hotPathProfile, 'developer-forced-global-spammer');
-      if (
-        settings.deleteSpammersEnabled &&
-        (await this.isDeveloperForcedGlobalSpammerCachedWithHotPathBudget(senderId, {
-          chatId,
-          messageId,
-        }))
-      ) {
-        await this.messageDuplicateService?.revokeActions?.(update);
-        if (commercialOcrEnqueueBase) {
-          const photoSenderAdminCheck = await this.resolveSenderChatAdminCheck(
-            chatId,
-            chat.adminUserIds,
-            senderId,
-            { allowRemoteLookup: true, skipRemoteLookupWhenLocalAdminsKnown: false },
-          );
-          if (!photoSenderAdminCheck.isAdmin && photoSenderAdminCheck.source !== 'local_fallback') {
-            await suppressDeferredPhotoAnalysisActions();
-          }
-        }
-        const handled = await this.deleteAndKickDetectedGlobalSpammer({
-          chatId,
-          userId: senderId,
-          messageId,
-          text,
-          createdAt,
-          reason: 'Developer-forced global blacklist',
-        });
-        if (!handled) {
-          throw new Error('Developer-forced spammer message deletion was not accepted');
-        }
-        return;
-      }
 
       this.markWebhookHotPathStage(hotPathProfile, 'admin-check');
       // FLAG: Modern duplicates own fresh qualification and sanction authority. A disabled
@@ -4947,6 +4875,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         await this.upsertGlobalSpammerEntry({
           userId,
           sourceChatId: chatId,
+          messageId,
           reason: 'SANCTION_BAN',
           evidence: {
             action: 'BAN',
@@ -6255,6 +6184,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
               sourceChatId: row.chatId,
               reason: 'SANCTION_BAN',
               evidenceHash: effectKey,
+              messageId: row.messageId,
+              observedAt: new Date(observedAtMs),
               evidence: {
                 action: 'BAN',
                 source: 'sanction',
@@ -6875,7 +6806,12 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       }),
     ]);
 
-    if (!latestSanctionEvent) {
+    // FLAG: A historical marked fallback cannot authorize current message deletion.
+    if (
+      !latestSanctionEvent ||
+      (latestSanctionEvent.action === 'MUTE' &&
+        this.asRecord(latestSanctionEvent.metadata)?.superBan === true)
+    ) {
       await this.rememberInactiveActiveMuteState(chatId, userId);
       return null;
     }
@@ -6984,16 +6920,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     senderName?: string;
     messageId: string;
     settings: ChatSettings;
-    superBanOnly?: boolean;
   }): Promise<boolean> {
-    if (
-      !recognizesAdminForwardedModerationCommand(
-        params.update,
-        params.settings,
-        params.superBanOnly,
-      )
-    )
-      return false;
+    if (!recognizesAdminForwardedModerationCommand(params.update, params.settings)) return false;
     const authority =
       this.injectedGroupCommandAuthority ?? new GroupCommandAuthorityService(this.prisma);
     const botId =
@@ -7031,12 +6959,10 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     senderName?: string;
     messageId: string;
     settings: ChatSettings;
-    superBanOnly?: boolean;
     permit: GroupCommandPermit;
     authority: GroupCommandAuthorityService;
   }): Promise<boolean> {
-    const { update, chatId, chatTitle, senderId, senderName, messageId, settings, superBanOnly } =
-      params;
+    const { update, chatId, chatTitle, senderId, senderName, messageId, settings } = params;
     if (update.type !== 'message_created') {
       return false;
     }
@@ -7066,9 +6992,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     if (!command) {
       return false;
     }
-    if (superBanOnly === true && command.action !== 'SUPER_BAN') {
-      return false;
-    }
 
     const actor: AuthUser = {
       userId: senderId,
@@ -7088,15 +7011,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         'Admin forwarded command ignored: manual moderation service is unavailable',
       );
       return false;
-    }
-
-    if (command.action === 'SUPER_BAN' && !manualBridge.isSuperBanDeveloperUserId(senderId)) {
-      await sendNotice({
-        chatId,
-        settings,
-        text: 'Недостаточно прав: команду `супер бан` может запускать только разработчик бота.',
-      });
-      return true;
     }
 
     if (command.action === 'RULES') {
@@ -7212,27 +7126,23 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
     const targets = extractForwardedModerationTargets(update, chatId);
     const commandHelpText =
-      command.action === 'SUPER_BAN'
-        ? '`супер бан`'
-        : command.action === 'MUTE'
-          ? command.fanoutAllChats === true
-            ? '`Мут!`'
-            : `\`${getAdminCommandName(
-                command.mutePermanent
-                  ? settings.adminPermanentMuteCommandName
-                  : settings.adminMuteCommandName,
-                command.mutePermanent
-                  ? ADMIN_PERMANENT_MUTE_COMMAND_NAME_DEFAULT
-                  : ADMIN_MUTE_COMMAND_NAME_DEFAULT,
-              )}\``
+      command.action === 'MUTE'
+        ? command.fanoutAllChats === true
+          ? '`Мут!`'
           : `\`${getAdminCommandName(
-              command.fanoutAllChats
-                ? settings.adminBanAllCommandName
-                : settings.adminBanCommandName,
-              command.fanoutAllChats
-                ? ADMIN_BAN_ALL_COMMAND_NAME_DEFAULT
-                : ADMIN_BAN_COMMAND_NAME_DEFAULT,
-            )}\``;
+              command.mutePermanent
+                ? settings.adminPermanentMuteCommandName
+                : settings.adminMuteCommandName,
+              command.mutePermanent
+                ? ADMIN_PERMANENT_MUTE_COMMAND_NAME_DEFAULT
+                : ADMIN_MUTE_COMMAND_NAME_DEFAULT,
+            )}\``
+        : `\`${getAdminCommandName(
+            command.fanoutAllChats ? settings.adminBanAllCommandName : settings.adminBanCommandName,
+            command.fanoutAllChats
+              ? ADMIN_BAN_ALL_COMMAND_NAME_DEFAULT
+              : ADMIN_BAN_COMMAND_NAME_DEFAULT,
+          )}\``;
     if (targets.length === 0) {
       await sendNotice({
         chatId,
@@ -7264,42 +7174,27 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
     let queued = false;
     try {
-      queued =
-        command.action === 'SUPER_BAN'
-          ? await manualBridge.enqueueDeveloperSuperBanCommand({
-              sourceChatId: chatId,
-              commandBotId,
-              targetUserId: target.userId,
-              targetSenderName: target.senderName ?? null,
-              targetMessageId: target.messageId ?? null,
-              commandMessageId: messageId,
-              actor,
-              deleteBotMessagesEnabled: settings.deleteBotMessagesEnabled,
-              deleteBotMessagesDelayMinutes: settings.deleteBotMessagesDelayMinutes,
-            })
-          : await manualBridge.enqueueManualGroupModerationCommand({
-              sourceChatId: chatId,
-              commandBotId,
-              targetUserId: target.userId,
-              targetSenderName: target.senderName ?? null,
-              targetMessageId: target.messageId ?? null,
-              commandMessageId: messageId,
-              actor,
-              action: command.action,
-              ...(command.action === 'BAN'
-                ? { fanoutAllChats: command.fanoutAllChats === true }
-                : {}),
-              ...(command.action === 'MUTE'
-                ? {
-                    fanoutAllChats: command.fanoutAllChats === true,
-                    ...(command.mutePermanent
-                      ? { mutePermanent: true }
-                      : { muteDurationHours: command.muteDurationHours }),
-                  }
-                : {}),
-              deleteBotMessagesEnabled: settings.deleteBotMessagesEnabled,
-              deleteBotMessagesDelayMinutes: settings.deleteBotMessagesDelayMinutes,
-            });
+      queued = await manualBridge.enqueueManualGroupModerationCommand({
+        sourceChatId: chatId,
+        commandBotId,
+        targetUserId: target.userId,
+        targetSenderName: target.senderName ?? null,
+        targetMessageId: target.messageId ?? null,
+        commandMessageId: messageId,
+        actor,
+        action: command.action,
+        ...(command.action === 'BAN' ? { fanoutAllChats: command.fanoutAllChats === true } : {}),
+        ...(command.action === 'MUTE'
+          ? {
+              fanoutAllChats: command.fanoutAllChats === true,
+              ...(command.mutePermanent
+                ? { mutePermanent: true }
+                : { muteDurationHours: command.muteDurationHours }),
+            }
+          : {}),
+        deleteBotMessagesEnabled: settings.deleteBotMessagesEnabled,
+        deleteBotMessagesDelayMinutes: settings.deleteBotMessagesDelayMinutes,
+      });
       if (!queued) {
         this.logger.warn(
           {
@@ -7313,10 +7208,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         await sendNotice({
           chatId,
           settings,
-          text:
-            command.action === 'SUPER_BAN'
-              ? 'Команда `супер бан` не запущена. Повторите через несколько секунд.'
-              : 'Команда не запущена. Повторите через несколько секунд.',
+          text: 'Команда не запущена. Повторите через несколько секунд.',
         });
       }
     } catch (error: unknown) {
@@ -7330,16 +7222,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         },
         'Failed to enqueue forwarded admin moderation command',
       );
-
-      if (command.action === 'SUPER_BAN') {
-        await sendNotice({
-          chatId,
-          settings,
-          text: `Команда \`супер бан\` не запущена: ${this.escapeMaxMarkdownText(
-            this.extractGroupAdminCommandErrorMessage(error),
-          )}`,
-        });
-      }
 
       return true;
     }
@@ -8494,7 +8376,9 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     };
     await this.ensureModerationDeleteIntent(deleteIntent);
 
-    const deleteAccepted = await this.attemptSpammerMessageDelete(deleteIntent);
+    const deletion = await this.attemptSpammerMessageDelete(deleteIntent);
+    // FLAG: A kick would invalidate current membership proof for a pending DELETE.
+    if (!deletion.gone) return deletion.accepted;
     const claimed = await this.claimMessageScopedModerationAction({
       chatId,
       userId,
@@ -8502,7 +8386,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       ruleCode: 'GLOBAL_SPAMMER_KICK',
     });
     if (!claimed) {
-      return deleteAccepted;
+      return deletion.accepted;
     }
 
     await this.kickAndLogKnownSpammerEvent({
@@ -8513,17 +8397,17 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       reason: 'Sender exists in global spammer registry',
       claimAlreadyAcquired: true,
     });
-    return deleteAccepted;
+    return deletion.accepted;
   }
 
   private async attemptSpammerMessageDelete(
     input: EnsureModerationDeleteIntentInput,
-  ): Promise<boolean> {
+  ): Promise<Pick<ModerationDeleteExecutionResult, 'accepted' | 'gone'>> {
     // FLAG: A sanction claim or a successful kick is not proof of message removal.
     // Retry deletion independently; only confirmed removal or durable acceptance handles it.
     try {
       const result = await this.executeModerationDelete(input);
-      return result.accepted;
+      return result;
     } catch (error: unknown) {
       this.logger.warn(
         {
@@ -8535,7 +8419,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         },
         'Spammer message deletion failed; continuing independent message moderation',
       );
-      return false;
+      return { accepted: false, gone: false };
     }
   }
 
@@ -8568,7 +8452,9 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     };
     await this.ensureModerationDeleteIntent(deleteIntent);
 
-    const deleteAccepted = await this.attemptSpammerMessageDelete(deleteIntent);
+    const deletion = await this.attemptSpammerMessageDelete(deleteIntent);
+    // FLAG: A kick would invalidate current membership proof for a pending DELETE.
+    if (!deletion.gone) return deletion.accepted;
     const claimed = await this.claimMessageScopedModerationAction({
       chatId,
       userId,
@@ -8576,7 +8462,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       ruleCode: 'LOCAL_ADMIN_BLOCK',
     });
     if (!claimed) {
-      return deleteAccepted;
+      return deletion.accepted;
     }
 
     await this.kickAndLogKnownSpammerEvent({
@@ -8588,7 +8474,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       ruleCode: 'LOCAL_ADMIN_BLOCK',
       claimAlreadyAcquired: true,
     });
-    return deleteAccepted;
+    return deletion.accepted;
   }
 
   private async handleServiceKnownSpammerMembersEvent(params: {
@@ -8625,10 +8511,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         update,
         ruleCode: 'LOCAL_ADMIN_BLOCK',
       });
-      if (!claimed) {
-        kickedUserIds.push(userId);
-        continue;
-      }
+      if (!claimed) continue;
       const enforced = await this.kickAndLogKnownSpammerEvent({
         chatId,
         userId,
@@ -8654,6 +8537,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       },
       select: {
         userId: true,
+        sourceBreakdown: true,
       },
     });
     if (rows.length === 0) {
@@ -8668,16 +8552,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
       const adminExempt = localAdminDecisions.get(row.userId) === 'ALLOW';
-      const claimed = await this.claimServiceMemberActionDelivery({
-        chatId,
-        userId: row.userId,
-        update,
-        ruleCode: 'GLOBAL_SPAMMER_KICK',
-      });
-      if (!claimed) {
-        kickedUserIds.push(row.userId);
-        continue;
-      }
       if (this.globalSpammerIntelligence) {
         const decision = await this.globalSpammerIntelligence.evaluatePolicy({
           chatId,
@@ -8691,9 +8565,18 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         if (decision.action !== 'DELETE_AND_KICK') {
           continue;
         }
-      } else if (adminExempt) {
+      } else if (adminExempt || !hasActiveRegistryProvenance(row.sourceBreakdown)) {
         continue;
       }
+      if (
+        !(await this.claimServiceMemberActionDelivery({
+          chatId,
+          userId: row.userId,
+          update,
+          ruleCode: 'GLOBAL_SPAMMER_KICK',
+        }))
+      )
+        continue;
       const enforced = await this.kickAndLogKnownSpammerEvent({
         chatId,
         userId: row.userId,
@@ -8869,6 +8752,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           userId,
           sourceChatId: chatId,
           reason: fanoutReason,
+          messageId,
+          observedAt: new Date(params.createdAt),
           evidence: {
             uniqueChats: uniqueChatsState.size,
             windowSec: GLOBAL_SPAMMER_WINDOW_SEC,
@@ -8882,8 +8767,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           deleteSpammersEnabled &&
           !exemptFromEnforcement &&
           shouldCheckKnownSpammer &&
-          (!this.globalSpammerIntelligence ||
-            (await this.isUserKnownGlobalSpammer(userId, { chatId, messageId, trigger: 'fanout' })))
+          (await this.isUserKnownGlobalSpammer(userId, { chatId, messageId, trigger: 'fanout' }))
         ) {
           if (allowDestructiveSideEffects && !allowDestructiveSideEffects()) {
             void this.runtimeDiagnosticsService?.recordHotPathStageOutcome({
@@ -9116,7 +9000,9 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     };
     await this.ensureModerationDeleteIntent(deleteIntent);
 
-    const deleteAccepted = await this.attemptSpammerMessageDelete(deleteIntent);
+    const deletion = await this.attemptSpammerMessageDelete(deleteIntent);
+    // FLAG: A kick would invalidate current membership proof for a pending DELETE.
+    if (!deletion.gone) return deletion.accepted;
     const claimed = await this.claimMessageScopedModerationAction({
       chatId,
       userId,
@@ -9124,7 +9010,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       ruleCode: 'GLOBAL_SPAMMER_KICK',
     });
     if (!claimed) {
-      return deleteAccepted;
+      return deletion.accepted;
     }
 
     await this.kickAndLogKnownSpammerEvent({
@@ -9135,7 +9021,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       reason,
       claimAlreadyAcquired: true,
     });
-    return deleteAccepted;
+    return deletion.accepted;
   }
 
   private buildGlobalSpammerSignature(params: {
@@ -9414,6 +9300,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
   }
 
   private markLocalGlobalSpammerChatObservation(chatId: string, userId: string): void {
+    this.boundSpammerCache(this.globalSpammerLocalChatObservations);
     this.globalSpammerLocalChatObservations.set(
       this.buildLocalGlobalSpammerChatObservationKey(chatId, userId),
       Date.now() + GLOBAL_SPAMMER_LOCAL_CHAT_OBSERVATION_TTL_MS,
@@ -9464,11 +9351,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       }
 
       const cached = this.readGlobalSpammerExemptionCache(cacheScopeKey, normalizedUserId);
-      if (cached === null) {
+      if (cached === undefined) {
         unresolvedUserIds.push(normalizedUserId);
         continue;
       }
-      cachedDecisions.set(normalizedUserId, cached);
+      if (cached !== null) cachedDecisions.set(normalizedUserId, cached);
     }
 
     if (unresolvedUserIds.length === 0) {
@@ -9670,18 +9557,24 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     return `${chatId?.trim() || 'global'}|${adminUserIds.join(',')}`;
   }
 
+  private boundSpammerCache(cache: Map<string, unknown>): void {
+    if (cache.size < 8192) return;
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
+  }
+
   private readGlobalSpammerExemptionCache(
     scopeKey: string,
     userId: string,
-  ): LocalGlobalSpammerAdminDecision | null {
+  ): LocalGlobalSpammerAdminDecision | null | undefined {
     const cacheKey = `${scopeKey}|${userId}`;
     const cached = this.globalSpammerExemptionCache.get(cacheKey);
     if (!cached) {
-      return null;
+      return undefined;
     }
     if (cached.expiresAtMs <= Date.now()) {
       this.globalSpammerExemptionCache.delete(cacheKey);
-      return null;
+      return undefined;
     }
 
     return cached.decision;
@@ -9692,6 +9585,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     userId: string,
     decision: LocalGlobalSpammerAdminDecision | null,
   ): void {
+    this.boundSpammerCache(this.globalSpammerExemptionCache);
     this.globalSpammerExemptionCache.set(`${scopeKey}|${userId}`, {
       expiresAtMs: Date.now() + GLOBAL_SPAMMER_EXEMPTION_CACHE_TTL_MS,
       decision,
@@ -9742,316 +9636,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       return decision.action === 'DELETE_AND_KICK';
     }
 
-    const globalSpammerModel = this.prisma.globalSpammer as unknown as {
-      findFirst?: (args: unknown) => Promise<{ userId: string; expiresAt?: Date | null } | null>;
-      findUnique?: (args: unknown) => Promise<{ userId: string; expiresAt?: Date | null } | null>;
-    };
-    const now = new Date();
-    const row =
-      typeof globalSpammerModel.findFirst === 'function'
-        ? await globalSpammerModel.findFirst({
-            where: {
-              userId,
-              expiresAt: {
-                gt: now,
-              },
-            },
-            select: {
-              userId: true,
-            },
-          })
-        : await globalSpammerModel.findUnique?.({
-            where: {
-              userId,
-            },
-            select: {
-              userId: true,
-              expiresAt: true,
-            },
-          });
-    if (!row) {
-      return false;
-    }
-    if ('expiresAt' in row) {
-      return row.expiresAt instanceof Date && row.expiresAt.getTime() > now.getTime();
-    }
-    return true;
-  }
-
-  private async isDeveloperForcedGlobalSpammerCached(userId: string): Promise<boolean> {
-    if (await this.legacyHolds?.isGlobalUserHeld(userId)) return false;
-    if (this.isKnownRuntimeBotUserId(userId)) {
-      return false;
-    }
-    const normalizedUserId = userId.trim();
-    if (!normalizedUserId) {
-      return false;
-    }
-
-    const getString = (this.redisCounter as Partial<RedisCounterService> | undefined)?.getString;
-    if (typeof getString === 'function') {
-      try {
-        if (
-          (await getString.call(
-            this.redisCounter,
-            buildDeveloperForcedGlobalSpammerCacheKey(normalizedUserId),
-          )) === '1'
-        ) {
-          return true;
-        }
-      } catch (error: unknown) {
-        this.logger.debug(
-          {
-            userId: normalizedUserId,
-            err: error instanceof Error ? error.message : String(error),
-          },
-          'Failed to read developer-forced global spammer cache',
-        );
-      }
-    }
-
-    if (this.hasDeveloperForcedGlobalSpammerMemoryCache(normalizedUserId)) {
-      return true;
-    }
-
-    if (this.developerForcedGlobalSpammerWarmUntilMs > Date.now()) {
-      return false;
-    }
-
-    if (typeof getString === 'function') {
-      try {
-        if (
-          (await getString.call(
-            this.redisCounter,
-            buildDeveloperForcedGlobalSpammerWarmMarkerKey(),
-          )) === '1'
-        ) {
-          this.developerForcedGlobalSpammerWarmUntilMs =
-            Date.now() + DEVELOPER_FORCED_GLOBAL_SPAMMER_MEMORY_CACHE_TTL_MS;
-          return false;
-        }
-      } catch (error: unknown) {
-        this.logger.debug(
-          {
-            userId: normalizedUserId,
-            err: error instanceof Error ? error.message : String(error),
-          },
-          'Failed to read developer-forced global spammer warm marker',
-        );
-      }
-    }
-
-    await this.warmDeveloperForcedGlobalSpammerCache();
-    return this.hasDeveloperForcedGlobalSpammerMemoryCache(normalizedUserId);
-  }
-
-  private async isDeveloperForcedGlobalSpammerCachedWithHotPathBudget(
-    userId: string,
-    context: {
-      chatId?: string | null;
-      messageId?: string | null;
-    } = {},
-  ): Promise<boolean> {
-    let timedOut = false;
-    const result = await raceWithTimeout({
-      operation: () => this.isDeveloperForcedGlobalSpammerCached(userId),
-      timeoutMs: DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS,
-      onTimeout: () => {
-        timedOut = true;
-        return false;
-      },
+    const row = await this.prisma.globalSpammer?.findFirst?.({
+      where: { userId, expiresAt: { gt: new Date() } },
+      select: { sourceBreakdown: true },
     });
-    if (timedOut) {
-      void this.runtimeDiagnosticsService?.recordHotPathStageOutcome({
-        stage: 'developer-forced-global-spammer.budget',
-        outcome: 'timeout',
-        failOpen: true,
-      });
-      this.logger.debug(
-        {
-          chatId: context.chatId ?? null,
-          userId,
-          messageId: context.messageId ?? null,
-          timeoutMs: DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS,
-        },
-        'Developer-forced global spammer lookup exceeded hot-path budget; continuing fail-open',
-      );
-    }
-
-    return result;
-  }
-
-  private hasDeveloperForcedGlobalSpammerMemoryCache(userId: string): boolean {
-    const expiresAtMs = this.developerForcedGlobalSpammerMemoryCache.get(userId);
-    if (!expiresAtMs) {
-      return false;
-    }
-    if (expiresAtMs <= Date.now()) {
-      this.developerForcedGlobalSpammerMemoryCache.delete(userId);
-      return false;
-    }
-    return true;
-  }
-
-  private async warmDeveloperForcedGlobalSpammerCache(): Promise<void> {
-    if (this.developerForcedGlobalSpammerWarmUntilMs > Date.now()) {
-      return;
-    }
-    if (this.developerForcedGlobalSpammerWarmInFlight) {
-      await this.developerForcedGlobalSpammerWarmInFlight;
-      return;
-    }
-
-    const warm = this.loadDeveloperForcedGlobalSpammerCacheFromRegistry();
-    this.developerForcedGlobalSpammerWarmInFlight = warm;
-    try {
-      await warm;
-    } finally {
-      this.developerForcedGlobalSpammerWarmInFlight = null;
-    }
-  }
-
-  private async loadDeveloperForcedGlobalSpammerCacheFromRegistry(): Promise<void> {
-    const globalSpammerModel = this.prisma.globalSpammer as unknown as {
-      findMany?: (args: unknown) => Promise<
-        Array<{
-          userId: string;
-          expiresAt?: Date | null;
-          sourceBreakdown?: Prisma.JsonValue | null;
-        }>
-      >;
-    } | null;
-    const now = new Date();
-    if (typeof globalSpammerModel?.findMany !== 'function') {
-      this.developerForcedGlobalSpammerWarmUntilMs =
-        Date.now() + DEVELOPER_FORCED_GLOBAL_SPAMMER_MEMORY_CACHE_TTL_MS;
-      return;
-    }
-
-    try {
-      const rows = await globalSpammerModel.findMany({
-        where: {
-          expiresAt: {
-            gt: now,
-          },
-          sourceBreakdown: {
-            path: ['DEVELOPER_FORCED'],
-            not: Prisma.JsonNull,
-          },
-        },
-        select: {
-          userId: true,
-          expiresAt: true,
-          sourceBreakdown: true,
-        },
-      });
-
-      const restoreTasks: Array<Promise<void>> = [];
-      for (const row of rows) {
-        const normalizedUserId = row.userId.trim();
-        if (
-          !normalizedUserId ||
-          this.isKnownRuntimeBotUserId(normalizedUserId) ||
-          !(row.expiresAt instanceof Date) ||
-          row.expiresAt.getTime() <= now.getTime() ||
-          !this.hasDeveloperForcedGlobalSpammerSource(row.sourceBreakdown)
-        ) {
-          continue;
-        }
-
-        this.developerForcedGlobalSpammerMemoryCache.set(
-          normalizedUserId,
-          Math.min(
-            row.expiresAt.getTime(),
-            Date.now() + DEVELOPER_FORCED_GLOBAL_SPAMMER_MEMORY_CACHE_TTL_MS,
-          ),
-        );
-        restoreTasks.push(
-          this.rememberDeveloperForcedGlobalSpammer(normalizedUserId, row.expiresAt),
-        );
-      }
-
-      restoreTasks.push(this.rememberDeveloperForcedGlobalSpammerWarmMarker());
-      await Promise.all(restoreTasks);
-      this.developerForcedGlobalSpammerWarmUntilMs =
-        Date.now() + DEVELOPER_FORCED_GLOBAL_SPAMMER_MEMORY_CACHE_TTL_MS;
-    } catch (error: unknown) {
-      this.logger.debug(
-        {
-          err: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to warm developer-forced global spammer cache',
-      );
-      this.developerForcedGlobalSpammerWarmUntilMs =
-        Date.now() + Math.min(30_000, DEVELOPER_FORCED_GLOBAL_SPAMMER_MEMORY_CACHE_TTL_MS);
-    }
-  }
-
-  private async rememberDeveloperForcedGlobalSpammer(
-    userId: string,
-    expiresAt?: Date | null,
-  ): Promise<void> {
-    const setStringWithTtl = (this.redisCounter as Partial<RedisCounterService> | undefined)
-      ?.setStringWithTtl;
-    if (typeof setStringWithTtl !== 'function') {
-      return;
-    }
-
-    const ttlSec =
-      expiresAt instanceof Date
-        ? Math.max(1, Math.ceil((expiresAt.getTime() - Date.now()) / 1_000))
-        : DEVELOPER_FORCED_GLOBAL_SPAMMER_CACHE_TTL_SEC;
-    try {
-      await setStringWithTtl.call(
-        this.redisCounter,
-        buildDeveloperForcedGlobalSpammerCacheKey(userId),
-        '1',
-        Math.min(DEVELOPER_FORCED_GLOBAL_SPAMMER_CACHE_TTL_SEC, ttlSec),
-      );
-    } catch (error: unknown) {
-      this.logger.debug(
-        {
-          userId,
-          err: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to restore developer-forced global spammer cache',
-      );
-    }
-  }
-
-  private async rememberDeveloperForcedGlobalSpammerWarmMarker(): Promise<void> {
-    const setStringWithTtl = (this.redisCounter as Partial<RedisCounterService> | undefined)
-      ?.setStringWithTtl;
-    if (typeof setStringWithTtl !== 'function') {
-      return;
-    }
-
-    try {
-      await setStringWithTtl.call(
-        this.redisCounter,
-        buildDeveloperForcedGlobalSpammerWarmMarkerKey(),
-        '1',
-        DEVELOPER_FORCED_GLOBAL_SPAMMER_WARM_MARKER_TTL_SEC,
-      );
-    } catch (error: unknown) {
-      this.logger.debug(
-        {
-          err: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to write developer-forced global spammer warm marker',
-      );
-    }
-  }
-
-  private hasDeveloperForcedGlobalSpammerSource(
-    sourceBreakdown: Prisma.JsonValue | null | undefined,
-  ): boolean {
-    return (
-      typeof sourceBreakdown === 'object' &&
-      sourceBreakdown !== null &&
-      !Array.isArray(sourceBreakdown) &&
-      Boolean((sourceBreakdown as Prisma.JsonObject).DEVELOPER_FORCED)
-    );
+    return hasActiveRegistryProvenance(row?.sourceBreakdown);
   }
 
   private async upsertGlobalSpammerEntry(params: {
@@ -10059,6 +9648,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     sourceChatId: string;
     reason: string;
     evidence?: Prisma.InputJsonValue;
+    messageId?: string;
+    observedAt?: Date;
     evidenceHash?: string;
   }) {
     const { userId, sourceChatId, reason, evidence } = params;
@@ -10141,6 +9732,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     sourceChatId: string;
     reason: string;
     evidence?: Prisma.InputJsonValue;
+    messageId?: string;
+    observedAt?: Date;
     evidenceHash?: string;
   }) {
     const sourceAndScore = this.resolveGlobalSpammerObservationSource(params.reason);
@@ -10150,6 +9743,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       score: sourceAndScore.score,
       reason: params.reason,
       chatId: params.sourceChatId,
+      ...(params.messageId ? { messageId: params.messageId } : {}),
+      ...(params.observedAt ? { observedAt: params.observedAt } : {}),
       evidence: params.evidence,
       ...(params.evidenceHash ? { evidenceHash: params.evidenceHash } : {}),
       forceRegistry: sourceAndScore.forceRegistry,
@@ -18384,6 +17979,9 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       }
 
       if (permanent) {
+        // FLAG: Older permanent mutes share the cache format used by retired fallback mutes.
+        if (ruleCode === 'MANUAL_MUTE' && parsed.ordinaryManualMuteVerified !== true)
+          return { status: 'miss' };
         return {
           status: 'active',
           mute: {
@@ -18468,6 +18066,9 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           durationHours: mute.durationHours,
           permanent: mute.permanent,
           ruleCode: mute.ruleCode ?? null,
+          ...(mute.permanent && mute.ruleCode === 'MANUAL_MUTE'
+            ? { ordinaryManualMuteVerified: true as const }
+            : {}),
         } satisfies CachedActiveMuteState),
         ttlSec,
       );

@@ -53,6 +53,7 @@ export const SOURCE_INVENTORY_DATE_COLUMNS: Readonly<Record<string, readonly str
   moderation_events: ['created_at'],
   moderation_violation_message_claims: ['created_at'],
   spammer_observations: [
+    'projection_due_at',
     'raw_evidence_expires_at',
     'observed_at',
     'expires_at',

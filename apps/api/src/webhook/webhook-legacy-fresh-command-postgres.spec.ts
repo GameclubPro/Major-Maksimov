@@ -100,7 +100,6 @@ native('fresh held command ingress, real SQL authority, BullMQ and guarded MAX',
     Object.assign(admin, {
       prisma: h.prisma,
       chatContextCache: h.cache,
-      superBanDeveloperUserIds: new Set(),
       assertChatAdmin: async () => undefined,
       ensureEntityType: async () => undefined,
       scheduleDestructiveModerationAdminRosterWarmup: () => undefined,

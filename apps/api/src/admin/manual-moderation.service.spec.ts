@@ -59,6 +59,8 @@ function createLegacyAdminServiceMock(resolvedProfile: typeof profile = profile)
 
 function createGlobalSpammerIntelligenceMock() {
   return {
+    assertReviewSubjectInChat: jest.fn().mockResolvedValue(undefined),
+    getEnforcementMode: jest.fn().mockReturnValue('shadow'),
     listReviewQueue: jest
       .fn()
       .mockImplementation(async (params: { includeLocalProfiles?: boolean }) => ({
@@ -228,6 +230,7 @@ describe('ManualModerationService spammer profiles', () => {
 
     expect(globalSpammerIntelligence.listReviewQueue).toHaveBeenCalledWith({
       chatId: 'chat-1',
+      reviewerUserId: authUser.userId,
       status: 'PENDING',
       limit: 6,
       includeObservations: false,
@@ -267,6 +270,7 @@ describe('ManualModerationService spammer profiles', () => {
 
     expect(globalSpammerIntelligence.listReviewQueue).toHaveBeenCalledWith({
       chatId: 'chat-1',
+      reviewerUserId: authUser.userId,
       status: 'PENDING',
       limit: 6,
       includeObservations: false,
@@ -330,6 +334,7 @@ describe('ManualModerationService spammer profiles', () => {
 
     expect(globalSpammerIntelligence.listReviewQueue).toHaveBeenCalledWith({
       chatId: 'chat-1',
+      reviewerUserId: authUser.userId,
       status: 'PENDING',
       limit: 6,
       includeObservations: true,
@@ -446,6 +451,7 @@ describe('ManualModerationService spammer profiles', () => {
 
     expect(globalSpammerIntelligence.listReviewQueue).toHaveBeenCalledWith({
       chatId: 'chat-1',
+      reviewerUserId: authUser.userId,
       status: 'PENDING',
       limit: 20,
       includeObservations: false,
@@ -478,6 +484,7 @@ describe('ManualModerationService spammer profiles', () => {
 
     expect(globalSpammerIntelligence.listReviewQueue).toHaveBeenCalledWith({
       chatId: 'chat-1',
+      reviewerUserId: authUser.userId,
       status: 'PENDING',
       limit: 20,
       includeObservations: false,
@@ -506,6 +513,7 @@ describe('ManualModerationService spammer profiles', () => {
 
     expect(globalSpammerIntelligence.getReviewMetrics).toHaveBeenCalledWith({
       chatId: 'chat-1',
+      reviewerUserId: authUser.userId,
       mode: 'summary',
     });
     expect(metrics.enforcementMode).toBe('enforce');
@@ -523,6 +531,7 @@ describe('ManualModerationService spammer profiles', () => {
 
     expect(globalSpammerIntelligence.getReviewMetrics).toHaveBeenCalledWith({
       chatId: 'chat-1',
+      reviewerUserId: authUser.userId,
       mode: 'full',
     });
   });
@@ -716,5 +725,36 @@ describe('ManualModerationService command bridge', () => {
       authUser,
       'private_command',
     );
+  });
+});
+
+describe('spammer surfaces with chat scoped evidence', () => {
+  it('denies diagnostics and reviews before loading data for a subject outside the chat', async () => {
+    const registry = createGlobalSpammerIntelligenceMock();
+    registry.assertReviewSubjectInChat.mockRejectedValue(new Error('No participant evidence'));
+    const service = new ManualModerationService(
+      createLegacyAdminServiceMock() as never,
+      registry as never,
+    );
+    await expect(
+      service.getGlobalSpammerUserDiagnostics('chat-1', 'other', authUser),
+    ).rejects.toThrow('No participant evidence');
+    await expect(
+      service.reviewGlobalSpammerCandidate('chat-1', 'other', authUser, { action: 'APPROVE' }),
+    ).rejects.toThrow('No participant evidence');
+    expect(registry.getUserDiagnostics).not.toHaveBeenCalled();
+    expect(registry.reviewCandidate).not.toHaveBeenCalled();
+  });
+
+  it('reports the mode without querying counters', async () => {
+    const registry = createGlobalSpammerIntelligenceMock();
+    const service = new ManualModerationService(
+      createLegacyAdminServiceMock() as never,
+      registry as never,
+    );
+    await expect(
+      service.getGlobalSpammerReviewMetrics('chat-1', authUser, { mode: 'mode' }),
+    ).resolves.toMatchObject({ enforcementMode: 'shadow' });
+    expect(registry.getReviewMetrics).not.toHaveBeenCalled();
   });
 });

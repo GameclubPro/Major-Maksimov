@@ -20,7 +20,6 @@ export const AUXILIARY_QUEUE_NAMES = [
   'max-chat-admin-roster-sync',
   'admin-manual-fanout',
   'admin-manual-commands',
-  'admin-super-ban',
   'admin-suggestion-delivery',
   'moderation-delete-intents',
   'message-duplicates',

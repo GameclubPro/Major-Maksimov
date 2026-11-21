@@ -4583,6 +4583,15 @@ export class ModerationDeleteIntentService {
     return clockAtMs;
   }
 
+  private isUnattributedLegacyManualCleanup(reason: { ruleCode: string; metadata: unknown }) {
+    return (
+      (reason.ruleCode === 'MANUAL_GROUP_COMMAND_MESSAGE_CLEANUP' ||
+        reason.ruleCode === 'MANUAL_GROUP_COMMAND_TARGET_MESSAGE_CLEANUP' ||
+        reason.ruleCode === 'MANUAL_ACTION_RECENT_MESSAGE_CLEANUP') &&
+      this.asRecord(reason.metadata)?.ordinaryManualCleanupVersion !== 1
+    );
+  }
+
   private async authorizeGuardedUserDeleteReasons(
     intent: IntentRow,
     botId: string,
@@ -4598,6 +4607,13 @@ export class ModerationDeleteIntentService {
     if (!reasons.length) throw new ModerationDeleteReasonMissingError();
     if (reasons.length > 64) throw new Error('Moderation delete reason validation limit exceeded');
     const fingerprint = fingerprintGuardedDeleteReasons(reasons);
+    // FLAG: Older manual cleanup used the same reason for ordinary and retired
+    // commands. Without an ordinary writer marker, that reason cannot authorize
+    // another DELETE. Other independently valid reasons can still act.
+    if (reasons.every((reason) => this.isUnattributedLegacyManualCleanup(reason))) {
+      throw new ModerationDeleteReasonsRejectedError(fingerprint);
+    }
+
     const params = {
       intentId: intent.id,
       chatId: intent.chatId,
@@ -9108,6 +9124,7 @@ export class ModerationDeleteIntentService {
     // FLAG: Keep metadata-bound independent policies executable under their own rollout ceiling.
     return reasons.some(
       (reason) =>
+        !this.isUnattributedLegacyManualCleanup(reason) &&
         this.getRolloutForInput({
           chatId,
           ruleCode: reason.ruleCode,

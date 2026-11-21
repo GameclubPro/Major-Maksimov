@@ -2,7 +2,40 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChannelStatsResponse } from '@maxim/contracts/channel-stats';
 import type { ChatParticipantDetails, ChatSanctionsPage } from '@maxim/contracts';
+import {
+  buildPreviewSpammerReviewPage,
+  createPreviewSpammerReviewCandidates,
+} from '../src/lib/api/preview-transport-events-fixtures';
 import { createPreviewApiTransport } from '../src/lib/api/preview-transport';
+
+test('preview review pages apply status before the cursor and end on an unknown cursor', () => {
+  const [candidate] = createPreviewSpammerReviewCandidates(new Date('2026-11-21T00:00:00Z'));
+  assert.ok(candidate);
+  const rows = [
+    candidate,
+    { ...candidate, userId: 'resolved', status: 'APPROVED' as const },
+    { ...candidate, userId: 'second' },
+  ];
+  const page = (cursor?: string) =>
+    buildPreviewSpammerReviewPage(
+      rows,
+      new URLSearchParams({ limit: '1', ...(cursor ? { cursor } : {}) }),
+    );
+  const first = page();
+  assert.deepEqual(
+    first.items.map(({ userId }) => userId),
+    [candidate.userId],
+  );
+  assert.equal(first.nextCursor, candidate.userId);
+  assert.ok(first.nextCursor);
+  const last = page(first.nextCursor);
+  assert.deepEqual(
+    last.items.map(({ userId }) => userId),
+    ['second'],
+  );
+  assert.equal(last.nextCursor, null);
+  assert.deepEqual(page('missing').items, []);
+});
 
 test('preview former participants keep sanctions independent from immunity and expose local ban release', async () => {
   const api = createPreviewApiTransport();

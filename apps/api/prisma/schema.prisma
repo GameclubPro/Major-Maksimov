@@ -2103,6 +2103,7 @@ model SpammerObservation {
   ttlDays              Int       @default(14) @map("ttl_days")
   explainReason        String    @default("") @map("explain_reason")
   privacyClass         String    @default("STANDARD") @map("privacy_class")
+  projectionDueAt      DateTime? @map("projection_due_at")
   rawEvidenceExpiresAt DateTime? @map("raw_evidence_expires_at")
   observedAt           DateTime  @default(now()) @map("observed_at")
   expiresAt            DateTime  @map("expires_at")

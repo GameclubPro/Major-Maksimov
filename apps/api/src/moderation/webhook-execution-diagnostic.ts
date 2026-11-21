@@ -45,7 +45,6 @@ const HOT_PATH_STAGES = new Set([
   'admin-check',
   'admin-command',
   'chat-context',
-  'developer-forced-global-spammer',
   'duplicate-admin-recheck',
   'duplicate-delete',
   'duplicate-follow-up',

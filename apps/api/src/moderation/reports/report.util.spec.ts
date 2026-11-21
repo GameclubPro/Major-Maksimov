@@ -57,6 +57,17 @@ describe('report trigger and eligibility', () => {
       reportContentHash(reply('photo', 'https://cdn.example/a?sig=new')),
     );
   });
+  it.each(['/супер-бан', 'super--ban'])(
+    'ignores retired command saved as a report alias %s',
+    (alias) => {
+      expect(
+        reportReplyTarget(update({ body: { mid: 'command', text: alias } }), {
+          reportsEnabled: true,
+          reportsAliases: [alias],
+        }),
+      ).toBeNull();
+    },
+  );
   it('requires an exact, case-insensitive direct reply', () => {
     expect(reportReplyTarget(update(), policy)).toBe('target');
     expect(reportReplyTarget(update({ body: { mid: 'command', text: 'жалоба' } }), policy)).toBe(

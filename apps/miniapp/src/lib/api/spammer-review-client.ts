@@ -2,7 +2,7 @@ import type { GlobalSpammerReviewMetrics } from '@maxim/contracts';
 import type { ApiTransport } from './transport';
 
 type GlobalSpammerReviewMetricsQuery = Partial<{
-  mode: 'summary' | 'full';
+  mode: 'mode' | 'summary' | 'full';
 }>;
 
 function hasRequestSignal(value: unknown): value is Pick<RequestInit, 'signal'> {
@@ -17,7 +17,7 @@ export async function getGlobalSpammerReviewMetrics(
 ): Promise<GlobalSpammerReviewMetrics> {
   const query = hasRequestSignal(queryOrRequest) ? {} : queryOrRequest;
   const params = new URLSearchParams();
-  if (query.mode === 'summary' || query.mode === 'full') {
+  if (query.mode === 'mode' || query.mode === 'summary' || query.mode === 'full') {
     params.set('mode', query.mode);
   }
   const queryString = params.toString();
