@@ -28,12 +28,13 @@ describeStores('native post-delete spammer KICK reader', () => {
   });
   afterEach(async () => {
     if (!h) return;
+    jest.restoreAllMocks();
     await h.prisma.adminGlobalSpammerExemption.deleteMany({ where: { adminUserId: adminId } });
     await h.prisma.globalSpammer.deleteMany({ where: { userId } });
     await h.dispose();
   });
 
-  async function ready(ruleCode = globalRule, ageMs = 1000) {
+  async function authorize(ruleCode: string) {
     if (ruleCode === localRule) {
       await h.prisma.chatAdminAllowlist.create({ data: { chatId, userId: adminId } });
       await h.prisma.adminGlobalSpammerExemption.create({
@@ -57,6 +58,10 @@ describeStores('native post-delete spammer KICK reader', () => {
         },
       });
     }
+  }
+
+  async function ready(ruleCode = globalRule, ageMs = 1000) {
+    await authorize(ruleCode);
     const reasonKey =
       ruleCode === localRule
         ? 'LOCAL_ADMIN_BLOCK:message-delete'
@@ -147,6 +152,118 @@ describeStores('native post-delete spammer KICK reader', () => {
     });
     await h.ruleFollowups.attempt(id, true);
   }
+
+  async function mirrorMessage(messageId: string) {
+    const at = Date.now();
+    await Promise.all(
+      h.bots.map((bot) =>
+        h.ingest({
+          chatId,
+          messageId,
+          senderId: userId,
+          botId: bot.id,
+          at,
+          text: 'A normal message from a previously confirmed spammer.',
+        }),
+      ),
+    );
+  }
+  async function ownedRow(messageId: string, ruleCode: string) {
+    return h.prisma.moderationRuleFollowup.findFirstOrThrow({
+      where: { chatId, userId, messageId, ruleCode },
+    });
+  }
+  async function assertCompletedOnce(messageId: string, ruleCode: string) {
+    expect(await ownedRow(messageId, ruleCode)).toMatchObject({
+      status: 'COMPLETED',
+      effects: { phase: 'SETTLED' },
+    });
+    expect(h.effects.filter((e) => e.method === 'delete' && e.path === '/messages')).toHaveLength(
+      1,
+    );
+    expect(memberEffects()).toHaveLength(1);
+    expect(await kickEvents()).toBe(1);
+    expect(
+      await h.prisma.moderationViolationMessageClaim.count({
+        where: {
+          chatId,
+          userId,
+          messageId,
+          updateType: 'message_action',
+          messageActionKey: { not: null },
+        },
+      }),
+    ).toBe(1);
+  }
+
+  it('persists a known-spammer continuation before DELETE and lets the webhook settle it inline', async () => {
+    await authorize(globalRule);
+    const messageId = randomUUID();
+    const background = jest.spyOn(h.ruleFollowups, 'sweep').mockResolvedValue(0);
+    const remove = h.max.deleteMessage.bind(h.max);
+    let pendingBeforeDelete = false;
+    jest.spyOn(h.max, 'deleteMessage').mockImplementation(async (...args) => {
+      const row = await ownedRow(messageId, globalRule);
+      expect(row).toMatchObject({ status: 'WAITING_DELETE', actionPlan: null });
+      pendingBeforeDelete = true;
+      return remove(...args);
+    });
+    await mirrorMessage(messageId);
+    await h.drain();
+    expect(pendingBeforeDelete).toBe(true);
+    await assertCompletedOnce(messageId, globalRule);
+    background.mockRestore();
+    await h.ruleFollowups.sweep();
+    await assertCompletedOnce(messageId, globalRule);
+  });
+
+  it('resumes a local block after webhook completion only when the delete worker confirms the exact message', async () => {
+    await authorize(localRule);
+    const messageId = randomUUID();
+    let unblock!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    let deleting = false;
+    const remove = h.max.deleteMessage.bind(h.max);
+    jest.spyOn(h.max, 'deleteMessage').mockImplementation(async (...args) => {
+      deleting = true;
+      await barrier;
+      return remove(...args);
+    });
+    const enroll = h.intents.ensureIntentWithRuleFollowup.bind(h.intents);
+    jest.spyOn(h.intents, 'ensureIntentWithRuleFollowup').mockImplementation(async (...args) => {
+      const registration = await enroll(...args);
+      // Let a separate worker take the real DELETE lease before the inline observer reads it.
+      await h.intents.sweepDueIntents();
+      const stop = Date.now() + 5000;
+      while (!deleting && Date.now() < stop)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      return registration;
+    });
+    try {
+      await mirrorMessage(messageId);
+      const stop = Date.now() + 10000;
+      while (!h.processedIds.length && Date.now() < stop) {
+        await h.pumpOnce();
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      expect(deleting).toBe(true);
+      expect(h.processedIds).toHaveLength(1);
+      expect(await ownedRow(messageId, localRule)).toMatchObject({
+        status: 'WAITING_DELETE',
+        actionPlan: null,
+      });
+      await h.ruleFollowups.sweep();
+      expect(memberEffects()).toHaveLength(0);
+      expect(await kickEvents()).toBe(0);
+    } finally {
+      unblock();
+    }
+    await h.drain();
+    await h.ruleFollowups.sweep();
+    await assertCompletedOnce(messageId, localRule);
+  });
 
   it.each([globalRule, localRule])(
     'sends one KICK and records it once across competing workers for %s',

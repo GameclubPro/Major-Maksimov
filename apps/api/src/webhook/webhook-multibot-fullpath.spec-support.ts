@@ -955,6 +955,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
     at?: number;
     attachments?: unknown[];
     senderless?: boolean;
+    senderId?: string;
     link?: Record<string, unknown>;
   }) {
     const at = input.at ?? Date.now();
@@ -964,7 +965,13 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
       message: {
         ...(input.senderless
           ? {}
-          : { sender: { user_id: 'fixture-user', name: 'Fixture user', is_bot: false } }),
+          : {
+              sender: {
+                user_id: input.senderId ?? 'fixture-user',
+                name: 'Fixture user',
+                is_bot: false,
+              },
+            }),
         recipient: {
           chat_id: input.chatId,
           chat_type: channelIds.has(input.chatId) ? 'channel' : 'chat',

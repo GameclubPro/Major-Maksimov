@@ -11,39 +11,20 @@ import {
 } from './moderation-message-action-claim';
 import { readRuleFollowupEnvelope } from './moderation-rule-followup-persistence';
 
-const globalRule = 'GLOBAL_SPAMMER_MESSAGE_DELETE';
+import { matchesSpammerKickReason, spammerKickPolicySha256 } from './spammer-kick-source';
+export { isSpammerKickRule, spammerKickPolicySha256 } from './spammer-kick-source';
 const localRule = 'LOCAL_ADMIN_BLOCK_MESSAGE_DELETE';
 const hash = (values: readonly string[]) =>
   createHash('sha256').update(JSON.stringify(values)).digest('hex');
-export const isSpammerKickRule = (rule: string) => rule === globalRule || rule === localRule;
 
 export function spammerMessageKickKey(chatId: string, userId: string, messageId: string) {
   return 'spammer-message-kick:v1:' + hash([chatId, userId, messageId]);
-}
-
-export function spammerKickPolicySha256(ruleCode: string) {
-  return hash(['spammer-message-kick-policy:v1', ruleCode, 'deleteSpammersEnabled']);
 }
 
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
-
-function matchesSource(row: ModerationRuleFollowup, reason: unknown): boolean {
-  if (row.ruleCode === localRule)
-    return (
-      row.reasonKey === 'LOCAL_ADMIN_BLOCK:message-delete' &&
-      reason === 'Local admin block for this admin scope'
-    );
-  return (
-    row.ruleCode === globalRule &&
-    ((row.reasonKey === 'GLOBAL_SPAMMER:known-message-delete' &&
-      reason === 'Sender exists in global spammer registry') ||
-      (row.reasonKey === 'GLOBAL_SPAMMER:detected-message-delete' &&
-        reason === 'Detected in 6 unique chats within 2 minutes'))
-  );
-}
 
 type Status = 'COMPLETED' | 'CANCELLED' | 'EXPIRED' | 'AMBIGUOUS' | 'RETRYABLE';
 export type SpammerKickDispatch = (
@@ -126,7 +107,7 @@ export async function executeSpammerKickFollowup(
       reason?.userId === row.userId &&
       reason.ruleCode === row.ruleCode &&
       metadata.moderationDeleteVerified === true &&
-      matchesSource(row, metadata.reason)
+      matchesSpammerKickReason(row.ruleCode, row.reasonKey, metadata.reason)
     );
   }
   async function lockOwned(tx: Prisma.TransactionClient, fresh: boolean) {

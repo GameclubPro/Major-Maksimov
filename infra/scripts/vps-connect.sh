@@ -2113,6 +2113,27 @@ if [[ "$command" == commercial-llm && "${1:-}" == workstation-pool-bridge && "${
   exit $?
 fi
 
+rollback_with_spammer_kick_reader() {
+  local entrypoint="$1" spammer_rollback_command
+  shift
+  build_guarded_rollback_command \
+    spammer_rollback_command \
+    "$entrypoint" \
+    maxim_topology_require_spammer_kick_reader \
+    "$@"
+  prepend_webhook_rollout_recovery_env spammer_rollback_command
+  remote_exec "$spammer_rollback_command"
+}
+
+release_rollback_includes_api() {
+  [[ $# -eq 1 ]] && return 0
+  local component
+  for component in "${@:2}"; do
+    [[ "$component" == api-shared ]] && return 0
+  done
+  return 1
+}
+
 case "$command" in
   pair-release-state)
     [[ "$#" == 0 ]] || exit 2
@@ -2195,10 +2216,18 @@ case "$command" in
     source_abandonment_corrective "$@"
     ;;
   rollback-runtime)
-    rollback_runtime "$@"
+    if [[ $# -eq 0 ]]; then
+      rollback_runtime "$@"
+    else
+      rollback_with_spammer_kick_reader ./infra/scripts/vps-runtime-rollback.sh "$@"
+    fi
     ;;
   rollback-release)
-    rollback_release "$@"
+    if release_rollback_includes_api "$@"; then
+      rollback_with_spammer_kick_reader ./infra/scripts/vps-release-rollback.sh "$@"
+    else
+      rollback_release "$@"
+    fi
     ;;
   allow-ssh-current-ip)
     allow_ssh_current_ip "$@"

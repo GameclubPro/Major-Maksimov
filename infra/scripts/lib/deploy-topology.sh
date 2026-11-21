@@ -407,6 +407,16 @@ maxim_topology_require_retired_super_ban() {
   node "$(dirname "${BASH_SOURCE[0]}")/../assert-retired-super-ban-source.mjs" "$1"
 }
 
+maxim_topology_require_spammer_kick_reader() {
+  local source_mode
+  # FLAG: An incompatible reader cancels retained KICK work and cannot settle its receipt.
+  source_mode="$(node "$(dirname "${BASH_SOURCE[0]}")/../assert-spammer-kick-source.mjs" "$1")" || return
+  if [[ "$source_mode" != reader && "$source_mode" != writer ]]; then
+    echo "Rollback API source cannot continue deferred spammer removals." >&2
+    return 1
+  fi
+}
+
 maxim_topology_require_fixed_moderator() {
   local commit_sha="$1"
   # FLAG: Never restore peer takeover after an administrator fixed a moderator.

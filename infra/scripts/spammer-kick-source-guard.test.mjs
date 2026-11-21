@@ -98,3 +98,28 @@ test('first writer needs a running reader and its immutable rollback image', () 
   assert.equal(driveGuard('writer', 'reader', digest, 'no'), 1);
   assert.equal(driveGuard('writer', 'reader', digest, 'yes'), 0);
 });
+
+test('both API rollback entrypoints preserve the deferred removal reader', () => {
+  const read = (name) => readFileSync(new URL('./' + name, import.meta.url), 'utf8');
+  const immutable = read('vps-release-rollback.sh');
+  const runtime = read('vps-runtime-rollback.sh');
+  const connector = read('vps-connect.sh');
+  const releaseCheck = immutable.indexOf(
+    'maxim_topology_require_spammer_kick_reader "$API_SOURCE_SHA"',
+  );
+  assert.ok(
+    releaseCheck > 0 && releaseCheck < immutable.indexOf('begin_release_runtime_transition', releaseCheck),
+  );
+  const refCheck = runtime.indexOf('maxim_topology_require_spammer_kick_reader "$TARGET_FULL_SHA"');
+  assert.ok(refCheck > 0 && refCheck < runtime.indexOf('git switch --detach "$TARGET_FULL_SHA"'));
+  assert.match(runtime, /Ref-based rollback would remove the spammer removal reader floor/u);
+  assert.match(
+    connector,
+    /rollback_with_spammer_kick_reader \.\/infra\/scripts\/vps-runtime-rollback\.sh/u,
+  );
+  assert.match(
+    connector,
+    /if release_rollback_includes_api "\$@"; then\s+rollback_with_spammer_kick_reader \.\/infra\/scripts\/vps-release-rollback\.sh/u,
+  );
+  assert.match(connector, /else\s+rollback_release "\$@"/u);
+});
