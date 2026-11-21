@@ -48,6 +48,7 @@ function createHarness() {
     accepted: true,
     gone: true,
     deleted: true,
+    ownReasonVerified: true,
   });
   const claim = jest.spyOn(internal, 'claimMessageScopedModerationAction').mockResolvedValue(true);
   const kick = jest.spyOn(internal, 'kickAndLogKnownSpammerEvent').mockResolvedValue(true);
@@ -103,6 +104,14 @@ describe.each([
   it('accepts durable pending deletion without claiming remote removal', async () => {
     const h = createHarness();
     h.execute.mockResolvedValue({ accepted: true, gone: false, deleted: false });
+    await expect(h.internal[handler](message)).resolves.toBe(true);
+    expect(h.claim).not.toHaveBeenCalled();
+    expect(h.kick).not.toHaveBeenCalled();
+  });
+
+  it('does not acquire a sanction claim for an absent message or another reason’s deletion', async () => {
+    const h = createHarness();
+    h.execute.mockResolvedValue({ accepted: true, gone: true, deleted: true });
     await expect(h.internal[handler](message)).resolves.toBe(true);
     expect(h.claim).not.toHaveBeenCalled();
     expect(h.kick).not.toHaveBeenCalled();

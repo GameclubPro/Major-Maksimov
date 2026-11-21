@@ -25,6 +25,7 @@ import {
   resolveConfiguredRuleEscalation,
   resolveMessageLimitsRuleEscalation,
 } from './moderation-rule-escalation';
+import { executeSpammerKickFollowup, spammerMessageKickKey } from './spammer-kick-followup';
 import { ModerationRuleFollowupService } from './moderation-rule-followup.service';
 import { RequiredSubscriptionCandidateStore } from './required-subscription-candidate.store';
 import type { RequiredSubscriptionCandidateAttempt } from './required-subscription-candidate.contract';
@@ -5854,6 +5855,54 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  async executeSpammerKickFollowup(
+    row: ModerationRuleFollowup,
+    leaseToken: string,
+    receiptOnly: boolean,
+  ) {
+    return executeSpammerKickFollowup(row, leaseToken, receiptOnly, {
+      db: this.prisma,
+      max: this.maxClient,
+      isHeld: (tx) => this.isLegacyModerationHeld(row.chatId, row.userId, row.messageId, tx),
+      dispatch: async (key, assertFinalOwnership) => {
+        await this.moderationSanctionStateLockService.runExclusive(
+          { chatId: row.chatId, userId: row.userId },
+          async (lock) => {
+            const guard = this.moderationStateDeleteGuard;
+            if (!guard) throw new Error('Spammer KICK guard unavailable');
+            await this.maxClient.kickMember(row.chatId, row.userId, {
+              immediate: true,
+              idempotencyKey: key,
+              trafficClass: 'critical',
+              actionHealthLane: 'critical',
+              sourceTag: MAX_API_SOURCE_TAGS.MODERATION_SANCTION,
+              timeoutMs: MODERATION_ACTION_DISPATCH_TIMEOUT_MS,
+              beforeImmediateMemberMutation: withMaxFinalAuthorityCheckpoint(
+                async (beforeFinalAuthority) => {
+                  const botId = this.maxBotContextService?.getActiveBotId();
+                  if (!botId) throw new Error('Spammer KICK executor identity unavailable');
+                  await guard.assertSpammerMemberAllowed({
+                    chatId: row.chatId,
+                    userId: row.userId,
+                    messageId: row.messageId,
+                    botId,
+                    localBlock: row.ruleCode === 'LOCAL_ADMIN_BLOCK_MESSAGE_DELETE',
+                    beforeFinalAuthority,
+                    sourceDeadlineAtMs: row.deadlineAt.getTime(),
+                    assertFinalOwnership: async () => {
+                      await lock.assertOwned();
+                      await assertFinalOwnership();
+                    },
+                  });
+                },
+              ),
+            });
+          },
+        );
+      },
+    });
+  }
+
   async executeRuleFollowup(
     row: ModerationRuleFollowup,
     plan: ModerationRuleFollowupPlan,
@@ -8378,7 +8427,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
     const deletion = await this.attemptSpammerMessageDelete(deleteIntent);
     // FLAG: A kick would invalidate current membership proof for a pending DELETE.
-    if (!deletion.gone) return deletion.accepted;
+    if (!deletion.gone || !deletion.ownReasonVerified) return deletion.accepted;
     const claimed = await this.claimMessageScopedModerationAction({
       chatId,
       userId,
@@ -8395,6 +8444,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       messageId,
       text,
       reason: 'Sender exists in global spammer registry',
+      messageKickKey: spammerMessageKickKey(chatId, userId, messageId),
+      sourceDeadlineAtMs: Date.parse(createdAt) + 300_000,
       claimAlreadyAcquired: true,
     });
     return deletion.accepted;
@@ -8402,7 +8453,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
   private async attemptSpammerMessageDelete(
     input: EnsureModerationDeleteIntentInput,
-  ): Promise<Pick<ModerationDeleteExecutionResult, 'accepted' | 'gone'>> {
+  ): Promise<Pick<ModerationDeleteExecutionResult, 'accepted' | 'gone' | 'ownReasonVerified'>> {
     // FLAG: A sanction claim or a successful kick is not proof of message removal.
     // Retry deletion independently; only confirmed removal or durable acceptance handles it.
     try {
@@ -8454,7 +8505,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
     const deletion = await this.attemptSpammerMessageDelete(deleteIntent);
     // FLAG: A kick would invalidate current membership proof for a pending DELETE.
-    if (!deletion.gone) return deletion.accepted;
+    if (!deletion.gone || !deletion.ownReasonVerified) return deletion.accepted;
     const claimed = await this.claimMessageScopedModerationAction({
       chatId,
       userId,
@@ -8471,6 +8522,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       messageId,
       text,
       reason: 'Local admin block for this admin scope',
+      messageKickKey: spammerMessageKickKey(chatId, userId, messageId),
+      sourceDeadlineAtMs: Date.parse(createdAt) + 300_000,
       ruleCode: 'LOCAL_ADMIN_BLOCK',
       claimAlreadyAcquired: true,
     });
@@ -8601,6 +8654,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     text: string;
     reason: string;
     ruleCode?: string;
+    messageKickKey?: string;
+    sourceDeadlineAtMs?: number;
     claimAlreadyAcquired?: boolean;
   }): Promise<boolean> {
     const {
@@ -8636,15 +8691,22 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
     try {
       if (
-        await this.kickMemberImmediately(
-          chatId,
-          userId,
-          createSpammerKickOptions(
+        await this.kickMemberImmediately(chatId, userId, {
+          ...createSpammerKickOptions(
             this.moderationStateDeleteGuard,
             () => this.maxBotContextService?.getActiveBotId() ?? undefined,
-            { chatId, userId, messageId, localBlock: ruleCode === 'LOCAL_ADMIN_BLOCK' },
+            {
+              chatId,
+              userId,
+              messageId,
+              localBlock: ruleCode === 'LOCAL_ADMIN_BLOCK',
+              ...(params.sourceDeadlineAtMs !== undefined
+                ? { sourceDeadlineAtMs: params.sourceDeadlineAtMs }
+                : {}),
+            },
           ),
-        )
+          ...(params.messageKickKey ? { idempotencyKey: params.messageKickKey } : {}),
+        })
       ) {
         await this.createBotModerationEvent({
           data: {
@@ -9002,7 +9064,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
     const deletion = await this.attemptSpammerMessageDelete(deleteIntent);
     // FLAG: A kick would invalidate current membership proof for a pending DELETE.
-    if (!deletion.gone) return deletion.accepted;
+    if (!deletion.gone || !deletion.ownReasonVerified) return deletion.accepted;
     const claimed = await this.claimMessageScopedModerationAction({
       chatId,
       userId,
@@ -9019,6 +9081,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       messageId,
       text,
       reason,
+      messageKickKey: spammerMessageKickKey(chatId, userId, messageId),
+      sourceDeadlineAtMs: Date.parse(createdAt) + 300_000,
       claimAlreadyAcquired: true,
     });
     return deletion.accepted;

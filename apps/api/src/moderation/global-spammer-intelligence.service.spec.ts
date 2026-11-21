@@ -298,7 +298,16 @@ function createPrismaMock() {
       let count = 0;
       for (const row of observations) {
         if (typeof where.id === 'string') {
-          if (row.id === where.id && row.projectionDueAt != null) {
+          const remainsPrunable =
+            where.rawEvidenceExpiresAt?.lte &&
+            row.updatedAt?.getTime() === where.updatedAt?.getTime() &&
+            row.privacyClass !== 'MINIMIZED' &&
+            row.rawEvidenceExpiresAt &&
+            row.rawEvidenceExpiresAt <= where.rawEvidenceExpiresAt.lte;
+          if (
+            row.id === where.id &&
+            (where.rawEvidenceExpiresAt ? remainsPrunable : row.projectionDueAt != null)
+          ) {
             Object.assign(row, data);
             count++;
           }
@@ -1772,7 +1781,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       }),
     );
 
-    expect(prisma.spammerObservation.update).toHaveBeenCalledWith(
+    expect(prisma.spammerObservation.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           privacyClass: 'MINIMIZED',
@@ -1817,9 +1826,9 @@ describe('GlobalSpammerIntelligenceService', () => {
             },
           },
         ]),
-        update: jest.fn(async ({ where, data }: any) => {
+        updateMany: jest.fn(async ({ where, data }: any) => {
           observations.push({ id: where.id, ...data });
-          return observations[observations.length - 1];
+          return { count: 1 };
         }),
       },
       $transaction: jest.fn(async (operations: Array<Promise<unknown>>) => Promise.all(operations)),
@@ -1866,9 +1875,9 @@ describe('GlobalSpammerIntelligenceService', () => {
             },
           },
         ]),
-        update: jest.fn(async ({ where, data }: any) => {
+        updateMany: jest.fn(async ({ where, data }: any) => {
           observations.push({ id: where.id, ...data });
-          return observations[observations.length - 1];
+          return { count: 1 };
         }),
       },
       $transaction: jest.fn(async (operations: Array<Promise<unknown>>) => Promise.all(operations)),
@@ -1892,15 +1901,15 @@ describe('GlobalSpammerIntelligenceService', () => {
   it('continues pruning raw evidence rows individually after a batch failure', async () => {
     const prunedRows: any[] = [];
     let batchMode = true;
-    const update = jest.fn(async ({ where, data }: any) => {
+    const updateMany = jest.fn(async ({ where, data }: any) => {
       if (batchMode) {
-        return { id: where.id };
+        return { count: 1 };
       }
       if (where.id === 'obs-bad-json') {
         throw new Error('invalid input syntax for type json');
       }
       prunedRows.push({ id: where.id, ...data });
-      return prunedRows[prunedRows.length - 1];
+      return { count: 1 };
     });
     const service = new GlobalSpammerIntelligenceService({
       spammerObservation: {
@@ -1921,7 +1930,7 @@ describe('GlobalSpammerIntelligenceService', () => {
             },
           },
         ]),
-        update,
+        updateMany,
       },
       $transaction: jest.fn(async () => {
         batchMode = false;
@@ -1942,7 +1951,7 @@ describe('GlobalSpammerIntelligenceService', () => {
       }),
     );
 
-    expect(update).toHaveBeenCalledTimes(4);
+    expect(updateMany).toHaveBeenCalledTimes(4);
     expect(prunedRows).toEqual([
       expect.objectContaining({
         id: 'obs-good-json',

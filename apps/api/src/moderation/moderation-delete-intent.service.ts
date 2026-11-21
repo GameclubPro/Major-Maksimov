@@ -4263,7 +4263,8 @@ export class ModerationDeleteIntentService {
               SELECT 1 FROM "moderation_rule_followups" followup
               WHERE followup."intent_id" = intent."id"
                 AND (followup."status" NOT IN ('COMPLETED', 'CANCELLED', 'EXPIRED')
-                  OR followup."effects"->>'phase' IN ('BAN_STARTED', 'UNKNOWN'))
+                  OR followup."effects"->>'phase' IN ('BAN_STARTED', 'UNKNOWN')
+                  OR followup."effects"->>'phase' = 'KICK_STARTED')
             )
             AND NOT EXISTS (
               SELECT 1

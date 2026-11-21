@@ -18,6 +18,7 @@ POSTGRES_AUDIT_ROLE=maxim_audit
 LEGACY_DEFAULT_DB_AUDIT_HELPER="$ROOT_DIR/infra/scripts/legacy-default-webhook-db-audit.mjs"
 LEGACY_DEFAULT_SNAPSHOT_PATH=''
 AUDIT_SQL_FILE=''
+SPAMMER_RETIREMENT_ARGS=()
 KARAVAN_CANDIDATE_ARGS=()
 AUDIT_STDERR_FILE=''
 AUDIT_BACKEND_MAY_EXIST=0
@@ -63,6 +64,7 @@ Usage:
   ./infra/scripts/vps-postgres-audit.sh commercial-quality [--explain]
   ./infra/scripts/vps-postgres-audit.sh network-statistics <negative-chat-ID-CSV, max 12> [--observations] [--membership=7d|30d] [--explain]
   ./infra/scripts/vps-postgres-audit.sh statistics-exchange <exact-actor-id> [--explain]
+  ./infra/scripts/vps-postgres-audit.sh spammer-retirement [--family registry|candidates|chats|archives|observations|profiles|campaigns] [--after cursor] [--limit 1..40] [--explain]
   ./infra/scripts/vps-postgres-audit.sh karavan-candidates [--after settings-id] [--limit 1..40] [--explain]
   ./infra/scripts/vps-postgres-audit.sh central-statistics <negative-chat-ID-CSV, max 12> [--explain]
 
@@ -135,6 +137,10 @@ case "$AUDIT_MODE" in
   statistics-exchange)
     STATISTICS_EXCHANGE_ARGS=("${@:2}")
     node "$ROOT_DIR/infra/scripts/statistics-exchange-audit.mjs" --validate-scope "${STATISTICS_EXCHANGE_ARGS[@]}" >/dev/null || exit 2
+    ;;
+  spammer-retirement)
+    SPAMMER_RETIREMENT_ARGS=("${@:2}")
+    node "$ROOT_DIR/infra/scripts/spammer-retirement-audit.mjs" --validate-scope "${SPAMMER_RETIREMENT_ARGS[@]}" >/dev/null || exit 2
     ;;
   karavan-candidates)
     KARAVAN_CANDIDATE_ARGS=("${@:2}")
@@ -255,10 +261,10 @@ esac
 
 # FLAG: This report attests public relations. Pin resolution before the shared
 # privilege admission as well as the report, including pg_temp last explicitly.
-if [[ "$AUDIT_MODE" == 'duplicate-history' || "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'publisher-slots' || "$AUDIT_MODE" == 'webhook-cohort' || "$AUDIT_MODE" == 'webhook-quarantine-proof' || "$AUDIT_MODE" == 'webhook-source-envelope' || "$AUDIT_MODE" == 'webhook-held-receipt' || "$AUDIT_MODE" == 'webhook-recovery-key-cohort' || "$AUDIT_MODE" == 'network-statistics' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then
+if [[ "$AUDIT_MODE" == 'duplicate-history' || "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'publisher-slots' || "$AUDIT_MODE" == 'webhook-cohort' || "$AUDIT_MODE" == 'webhook-quarantine-proof' || "$AUDIT_MODE" == 'webhook-source-envelope' || "$AUDIT_MODE" == 'webhook-held-receipt' || "$AUDIT_MODE" == 'webhook-recovery-key-cohort' || "$AUDIT_MODE" == 'network-statistics' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'spammer-retirement' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then
   POSTGRES_AUDIT_OPTIONS+=' -c search_path=pg_catalog,public,pg_temp'
 fi
-if [[ "$AUDIT_MODE" == 'duplicate-history' || "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then POSTGRES_AUDIT_OPTIONS+=' -c timezone=UTC'; fi
+if [[ "$AUDIT_MODE" == 'duplicate-history' || "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'spammer-retirement' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then POSTGRES_AUDIT_OPTIONS+=' -c timezone=UTC'; fi
 
 emit_prelude() {
   cat <<'SQL'
@@ -569,6 +575,7 @@ SELECT CASE
                 'moderation_delete_intents',
                 'moderation_delete_intent_reasons'
               )
+              OR (namespace.nspname='maxim_spammer_audit' AND relation.relkind='v' AND relation.relname IN ('registry','candidates','chats','archives','observations','profiles','campaigns','keys_registry','keys_candidates','keys_chats','keys_archives','keys_observations','keys_profiles','keys_campaigns'))
             )
             AND (
               has_table_privilege('maxim_audit', relation.oid, 'SELECT')
@@ -2540,6 +2547,7 @@ emit_sql() {
   local chat_moderation_privilege_args=(--privileges)
   if [[ "$AUDIT_MODE" == 'chat-moderation' ]]; then chat_moderation_privilege_args+=(--require-all); fi
   node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" "${chat_moderation_privilege_args[@]}"
+  node "$ROOT_DIR/infra/scripts/spammer-retirement-audit.mjs" --privileges
   local karavan_privilege_args=(--privileges)
   if [[ "$AUDIT_MODE" == 'karavan-candidates' ]]; then karavan_privilege_args+=(--require-all); fi
   node "$ROOT_DIR/infra/scripts/karavan-candidates-audit.mjs" "${karavan_privilege_args[@]}"
@@ -2585,6 +2593,9 @@ emit_sql() {
       ;;
     chat-moderation)
       node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" "${CHAT_MODERATION_ARGS[@]}"
+      ;;
+    spammer-retirement)
+      node "$ROOT_DIR/infra/scripts/spammer-retirement-audit.mjs" "${SPAMMER_RETIREMENT_ARGS[@]}"
       ;;
     karavan-candidates)
       node "$ROOT_DIR/infra/scripts/karavan-candidates-audit.mjs" "${KARAVAN_CANDIDATE_ARGS[@]}"

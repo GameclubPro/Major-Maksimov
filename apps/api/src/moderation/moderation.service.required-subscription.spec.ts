@@ -1,4 +1,6 @@
 import { ChannelPostDemandRuntime } from './channel-post-demand-runtime';
+import type { EnsureModerationDeleteIntentInput } from './moderation-delete-intent.types';
+import type { ModerationDeleteExecutionResult } from './profanity/profanity-delete-execution';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import type { MaxClientService } from '../max/max-client.service';
 import type { ManagedEntityAccessLossService } from '../max/managed-entity-access-loss.service';
@@ -34,13 +36,16 @@ import {
 
 // FLAG: This suite verifies orchestration with an explicit successful deletion boundary.
 // Real current-policy, lease, receipt and selected-token guards run in the native fullpath suite.
-function installRequiredSubscriptionFixtureGuards(service: ModerationService): ModerationService {
+function installRequiredSubscriptionFixtureGuards(
+  service: ModerationService,
+  confirmedSpammerReason?: Pick<EnsureModerationDeleteIntentInput, 'ruleCode' | 'reasonKey'>,
+): ModerationService {
   const boundary = service as unknown as {
     moderationDeleteIntentService?: unknown;
     executeModerationDelete(
-      input: { chatId: string; messageId: string },
+      input: EnsureModerationDeleteIntentInput,
       options?: unknown,
-    ): Promise<unknown>;
+    ): Promise<ModerationDeleteExecutionResult>;
     deleteMessageImmediatelyLegacy(
       chatId: string,
       messageId: string,
@@ -56,7 +61,7 @@ function installRequiredSubscriptionFixtureGuards(service: ModerationService): M
         .mockResolvedValue({ reasonKeys: ['REQUIRED_SUBSCRIPTION:message-delete'] }),
     },
     executeModerationDelete: jest.fn(
-      async (input: { chatId: string; messageId: string }, options?: unknown) => {
+      async (input: EnsureModerationDeleteIntentInput, options?: unknown) => {
         if (boundary.moderationDeleteIntentService) return original(input, options);
         const result = await boundary.deleteMessageImmediatelyLegacy(
           input.chatId,
@@ -69,6 +74,11 @@ function installRequiredSubscriptionFixtureGuards(service: ModerationService): M
           deleted: result.ok,
           eventPersistedByIntent: false,
           botId: result.botId,
+          ...(result.ok &&
+          confirmedSpammerReason?.ruleCode === input.ruleCode &&
+          confirmedSpammerReason?.reasonKey === input.reasonKey
+            ? { ownReasonVerified: true as const }
+            : {}),
         };
       },
     ),
@@ -5515,13 +5525,19 @@ describe('ModerationService', () => {
         }),
       };
 
-      const service = createRequiredSubscriptionService(
-        prisma as never,
-        ruleEngine as never,
-        { resolveAction: jest.fn() } as never,
-        maxClient as never,
-        undefined,
-        systemModeService as never,
+      const service = installRequiredSubscriptionFixtureGuards(
+        new ModerationService(
+          prisma as never,
+          ruleEngine as never,
+          { resolveAction: jest.fn() } as never,
+          maxClient as never,
+          undefined,
+          systemModeService as never,
+        ),
+        {
+          ruleCode: 'LOCAL_ADMIN_BLOCK_MESSAGE_DELETE',
+          reasonKey: 'LOCAL_ADMIN_BLOCK:message-delete',
+        },
       );
       const trackingSpy = jest.spyOn(
         service as any,
@@ -5532,7 +5548,6 @@ describe('ModerationService', () => {
         .mockResolvedValue(undefined);
       (service as any).webhookHotTimeoutChatBackoffUntilMs.set('chat-1', Date.now() + 60_000);
       const update = createUpdate();
-      update.message!.createdAt = new Date().toISOString();
 
       await service.handleUpdate(update);
 
@@ -5615,13 +5630,19 @@ describe('ModerationService', () => {
         evaluatePolicy: jest.fn().mockResolvedValue({ action: 'DELETE_AND_KICK' }),
       };
 
-      const service = createRequiredSubscriptionService(
-        prisma as never,
-        ruleEngine as never,
-        { resolveAction: jest.fn() } as never,
-        maxClient as never,
-        undefined,
-        systemModeService as never,
+      const service = installRequiredSubscriptionFixtureGuards(
+        new ModerationService(
+          prisma as never,
+          ruleEngine as never,
+          { resolveAction: jest.fn() } as never,
+          maxClient as never,
+          undefined,
+          systemModeService as never,
+        ),
+        {
+          ruleCode: 'GLOBAL_SPAMMER_MESSAGE_DELETE',
+          reasonKey: 'GLOBAL_SPAMMER:known-message-delete',
+        },
       );
       (service as any).globalSpammerIntelligence = globalSpammerIntelligence;
       const trackingSpy = jest.spyOn(
