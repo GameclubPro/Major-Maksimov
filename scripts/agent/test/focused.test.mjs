@@ -117,6 +117,22 @@ test('focused JSON dry-run does not execute and actual child logs stay in stderr
   assert.equal(await readFile(join(repo, '.git/ran'), 'utf8'), 'yes');
 });
 
+test('an API type failure stops a typed focused run before Jest', async (t) => {
+  const repo = await fixture(t);
+  await writeFile(join(repo, 'apps/api/typecheck.cjs'), 'process.exitCode = 8;');
+  const run = invoke(repo, ['--typecheck', '--test', 'apps/api/src/a.spec.ts', '--json']);
+  assert.equal(run.status, 2, run.stderr);
+  const result = JSON.parse(run.stdout);
+  assert.deepEqual(
+    result.commands.map(({ id, status }) => [id, status]),
+    [
+      ['api-typecheck', 'failed'],
+      ['api-tests', 'not-run'],
+    ],
+  );
+  await assert.rejects(readFile(join(repo, '.git/argv.json')), { code: 'ENOENT' });
+});
+
 test('public API npm chain forwards only the selected Jest paths after preparation', async (t) => {
   const repo = await fixture(t);
   const run = invoke(repo, ['--test', 'apps/api/src/a.spec.ts', '--json']);
@@ -213,6 +229,7 @@ async function fixture(t) {
     'package.json': JSON.stringify({
       private: true,
       workspaces: ['apps/api', 'apps/miniapp', 'apps/admin', 'packages/contracts'],
+      scripts: { 'typecheck:api': 'npm run typecheck --workspace @maxim/api' },
     }),
     'apps/miniapp/package.json': JSON.stringify({
       name: '@maxim/miniapp',
@@ -229,6 +246,7 @@ async function fixture(t) {
         'test:unlocked': 'npm run prepare:codegen && npm run test:source',
         'prepare:codegen': 'node prepare.cjs',
         'test:source': 'node record.cjs',
+        typecheck: 'node typecheck.cjs',
       },
     }),
     'apps/api/prepare.cjs': "require('node:fs').writeFileSync('../../.git/prepared', 'yes');\n",

@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { knowledge, validateSupportAnswer } from './support-llm-client.mjs';
+import { knowledge, validateSupportAnswer } from '../../../infra/scripts/support-llm-client.mjs';
 
 const entries = new Map(knowledge.entries.map((entry) => [entry.id, entry]));
 const fact = (id) => {
   assert.ok(entries.has(id), id);
   return entries.get(id).answer;
 };
-const source = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+const source = (path) => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8');
 
 test('VK publication options distinguish new MAX timers, retained schedules and the original source', () => {
   const ui = source('apps/miniapp/src/components/vk-parsing/publication-options.tsx');

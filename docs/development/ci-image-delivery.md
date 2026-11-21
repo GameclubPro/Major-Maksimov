@@ -72,6 +72,10 @@ image lanes. The Docker context guard requires a new review if these host paths 
 inputs. Other shared tooling, build inputs, CI policy and unknown paths retain full coverage.
 `Required` recomputes the entire frozen plan and requires the selected static matrix to succeed.
 
+Keep fast checks that read application source across boundaries in Static (core), which runs
+for every CI plan. Publication rollback compatibility and support knowledge are checked here
+even when a change selects no infrastructure shard.
+
 Ubuntu system dependency preparation uses the official archive and security endpoints over HTTPS.
 The bounded rewrite covers the hosted runners' regional EC2 mirrors and preserves suites, signing
 keys and mirror-file indirection. The two browser jobs configure APT to use only the runner's

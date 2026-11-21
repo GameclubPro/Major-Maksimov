@@ -9,11 +9,18 @@ import { requestsJson } from './verify.mjs';
 import { runVerificationCommand } from './verification-command.mjs';
 
 export function parseFocusedArgs(argv) {
-  const options = { repo: process.cwd(), tests: [], dryRun: false, format: 'human' };
+  const options = {
+    repo: process.cwd(),
+    tests: [],
+    dryRun: false,
+    typecheck: false,
+    format: 'human',
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--json') options.format = 'json';
     else if (argument === '--dry-run') options.dryRun = true;
+    else if (argument === '--typecheck') options.typecheck = true;
     else if (['--test', '--repo', '--format'].includes(argument)) {
       const value = argv[++index];
       if (!value || value.startsWith('--')) throw new Error(`${argument} requires a value.`);
@@ -28,7 +35,7 @@ export function parseFocusedArgs(argv) {
   return options;
 }
 
-export async function selectFocusedCommands(root, tests) {
+export async function selectFocusedCommands(root, tests, { typecheck = false } = {}) {
   const groups = new Map();
   const nativeRequirements = new Map();
   const canonicalRoot = await realpath(root);
@@ -83,6 +90,24 @@ export async function selectFocusedCommands(root, tests) {
     for (const name of native) nativeRequirements.get(family).add(name);
   }
   const commands = [];
+  if (typecheck) {
+    if (!groups.has('api')) throw new Error('--typecheck requires a focused API test.');
+    const manifest = JSON.parse(await readFile(resolve(canonicalRoot, 'package.json'), 'utf8'));
+    if (manifest.scripts?.['typecheck:api'] !== 'npm run typecheck --workspace @maxim/api')
+      throw new Error('The public API typecheck runner changed.');
+    commands.push({
+      id: 'api-typecheck',
+      kind: 'npm-script',
+      executable: 'npm',
+      args: ['run', 'typecheck:api'],
+      cwd: canonicalRoot,
+      resources: ['checkout'],
+      requiredEnvironment: [],
+      status: 'not-run',
+      exitCode: null,
+      signal: null,
+    });
+  }
   for (const [family, paths] of groups) {
     let executable = 'npm';
     let args;
@@ -200,7 +225,7 @@ export async function runFocusedCli(argv = process.argv.slice(2), io = defaultIo
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
-    result.commands = await selectFocusedCommands(result.root, options.tests);
+    result.commands = await selectFocusedCommands(result.root, options.tests, options);
     result.requiresTestStores = result.commands.some(({ resources }) =>
       resources.includes('postgres'),
     );

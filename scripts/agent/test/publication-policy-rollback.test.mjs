@@ -4,11 +4,12 @@ import test from 'node:test';
 import {
   assertPublicationPolicySource,
   PUBLICATION_POLICY_SOURCE_CHECKS,
-} from './assert-publication-policy-source.mjs';
+} from '../../../infra/scripts/assert-publication-policy-source.mjs';
 
+const infra = new URL('../../../infra/scripts/', import.meta.url);
 const service = 'apps/api/src/admin/publication.service.ts';
 const projection = 'apps/api/src/admin/publication-calendar-projection.ts';
-const source = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+const source = (path) => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8');
 
 test('rollback requires the deadline reader, every execution boundary and the untouched-target CAS', () => {
   const sources = new Map(PUBLICATION_POLICY_SOURCE_CHECKS.map(([path]) => [path, source(path)]));
@@ -30,7 +31,7 @@ test('rollback requires the deadline reader, every execution boundary and the un
   }
   for (const path of ['vps-runtime-rollback.sh', 'vps-release-rollback.sh'])
     assert.match(
-      readFileSync(new URL(path, import.meta.url), 'utf8'),
+      readFileSync(new URL(path, infra), 'utf8'),
       /maxim_topology_require_publication_policy/u,
     );
 });

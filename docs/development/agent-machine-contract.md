@@ -120,6 +120,10 @@ accepted by this focused interface. Use their maintained public family entrypoin
 and [Lastik](../../apps/eraser/AGENTS.md). Do not rename a test or bypass API generator
 locks to force it into a supported family.
 
+For changes to API signatures or test doubles, add `--typecheck` to a focused API selection.
+It runs the locked public `npm run typecheck:api` before the selected tests. Include the affected
+callers and doubles in the selection. Use the regular focused runner for quick iteration.
+
 Focused checks are not the final aggregate. The commit helper owns final staged verification;
 do not run `verify`'s same aggregate in advance merely to populate coordinator status. Native cases
 still require the public [test-store wrapper](agent-local-environment.md) and explicit evidence of
