@@ -30,6 +30,21 @@ export const PUBLISHER_DEFERRAL_MIGRATIONS = Object.freeze([
   PUBLISHER_DEFERRAL_MIGRATION,
 ]);
 
+export const SPAMMER_DEFERRAL_MIGRATIONS = Object.freeze([
+  Object.freeze({
+    name: '20261121000000_add_spammer_projection_due',
+    checksum: '9f0b86b3b5c3179696afbc1547e3c66d51209061f8c766bdb9e48a68a2705520',
+  }),
+  Object.freeze({
+    name: '20261121000100_index_spammer_projection_due',
+    checksum: '75cd0d8c27d66436a2f6e803ff3880219e8f684ada4674bac4d7815ec2efdfa2',
+  }),
+]);
+const spammerDeferralTail = Object.freeze([
+  ...PUBLISHER_DEFERRAL_MIGRATIONS,
+  ...SPAMMER_DEFERRAL_MIGRATIONS,
+]);
+
 // FLAG: Only these verified failed versions can accompany the pinned later successful
 // version of the same migration. They never satisfy an applied-migration requirement.
 const RECOVERED_PREDECESSORS = new Map([
@@ -158,6 +173,47 @@ const publisherSchemaCtes = `publisher_table AS MATERIALIZED (
     WHEN bool_and(exact) THEN 'exact' ELSE 'invalid' END AS state FROM publisher_columns
 )`;
 
+// FLAG: Column and index receipts each require independent catalog evidence. Read no observation rows.
+const spammerSchemaCtes = `spammer_relations AS MATERIALIZED (
+  SELECT to_regclass('public.spammer_observations') AS parent,
+    to_regclass('public.spammer_observation_projection_due_idx') AS idx
+), spammer_schema AS MATERIALIZED (
+  SELECT CASE WHEN p.oid IS NULL THEN 'invalid' WHEN due.attnum IS NULL THEN 'absent'
+    WHEN due.atttypid='timestamp'::regtype AND due.atttypmod=3 AND NOT due.attnotnull
+      AND NOT due.atthasdef AND NOT due.atthasmissing AND due.attidentity='' AND due.attgenerated=''
+      AND due.attislocal AND due.attinhcount=0 AND d.oid IS NULL THEN 'exact' ELSE 'invalid' END AS column,
+    CASE WHEN p.oid IS NULL OR EXISTS (
+      SELECT 1 FROM pg_stat_progress_create_index b WHERE b.relid=r.parent
+        AND b.datid=(SELECT oid FROM pg_database WHERE datname=current_database())
+    ) OR EXISTS (
+      SELECT 1 FROM pg_class x WHERE x.relnamespace='public'::regnamespace
+        AND x.relname ~ '^spammer_observation_projection_due_idx.*_cc(new|old)[0-9]*$'
+    ) THEN 'invalid' WHEN idx.oid IS NULL THEN 'absent'
+    WHEN idx.relkind='i' AND idx.relpersistence='p' AND idx.reltablespace=0 AND idx.reloptions IS NULL
+      AND NOT idx.relispartition AND i.indrelid=p.oid AND am.amname='btree'
+      AND i.indisvalid AND i.indisready AND i.indislive AND i.indimmediate
+      AND NOT i.indisunique AND NOT i.indisprimary AND NOT i.indisexclusion
+      AND i.indnkeyatts=2 AND i.indnatts=2 AND i.indexprs IS NULL
+      AND i.indkey[0]=due.attnum AND i.indkey[1]=id.attnum AND id.atttypid='text'::regtype
+      AND i.indcollation[0]=due.attcollation AND i.indcollation[1]=id.attcollation
+      AND i.indoption[0]=0 AND i.indoption[1]=0
+      AND EXISTS (SELECT 1 FROM pg_opclass c WHERE c.oid=i.indclass[0] AND c.opcdefault
+        AND c.opcnamespace='pg_catalog'::regnamespace AND c.opcname='timestamp_ops' AND c.opcmethod=am.oid)
+      AND EXISTS (SELECT 1 FROM pg_opclass c WHERE c.oid=i.indclass[1] AND c.opcdefault
+        AND c.opcnamespace='pg_catalog'::regnamespace AND c.opcname='text_ops' AND c.opcmethod=am.oid)
+      AND pg_get_expr(i.indpred,i.indrelid,false)='(projection_due_at IS NOT NULL)'
+      THEN 'exact' ELSE 'invalid' END AS index
+  FROM spammer_relations r
+  LEFT JOIN pg_class p ON p.oid=r.parent AND p.relkind='r' AND p.relpersistence='p'
+    AND NOT p.relispartition AND NOT EXISTS (SELECT 1 FROM pg_inherits h WHERE h.inhrelid=p.oid OR h.inhparent=p.oid)
+  LEFT JOIN pg_attribute due ON due.attrelid=p.oid AND due.attname='projection_due_at' AND due.attnum>0 AND NOT due.attisdropped
+  LEFT JOIN pg_attrdef d ON d.adrelid=p.oid AND d.adnum=due.attnum
+  LEFT JOIN pg_attribute id ON id.attrelid=p.oid AND id.attname='id' AND id.attnum>0 AND NOT id.attisdropped
+  LEFT JOIN pg_class idx ON idx.oid=r.idx
+  LEFT JOIN pg_index i ON i.indexrelid=idx.oid
+  LEFT JOIN pg_am am ON am.oid=idx.relam
+)`;
+
 export const routingIndexStateSql = `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout = '2500ms';
 SET LOCAL lock_timeout = '250ms';
@@ -217,7 +273,7 @@ WITH definitions AS MATERIALIZED (
  SELECT progress.pid FROM pg_stat_progress_create_index progress
  WHERE progress.relid=to_regclass('public.webhook_events')
   AND progress.datid=(SELECT oid FROM pg_database WHERE datname=current_database()) LIMIT 17
-), ${giveawaySchemaCtes}, ${publisherSchemaCtes}, ${historicalCompatibilityCtes}
+), ${giveawaySchemaCtes}, ${publisherSchemaCtes}, ${spammerSchemaCtes}, ${historicalCompatibilityCtes}
 SELECT json_build_object('supportedVersion',current_setting('server_version_num')::int BETWEEN 160000 AND 169999,
  'index',(SELECT json_build_object('present',present,'exact',exact) FROM definitions WHERE name='index'),
  'orderedIndex',(SELECT json_build_object('present',present,'exact',exact) FROM definitions WHERE name='orderedIndex'),
@@ -226,6 +282,7 @@ SELECT json_build_object('supportedVersion',current_setting('server_version_num'
  'builders',COALESCE((SELECT json_agg(builders) FROM builders),'[]'::json),
  'giveawaySchema',(SELECT row_to_json(giveaway_schema) FROM giveaway_schema),
  'publisherSchema',(SELECT state FROM publisher_schema),
+ 'spammerSchema',(SELECT row_to_json(spammer_schema) FROM spammer_schema),
  'historicalCompatibility',${historicalCompatibilityProjection});
 COMMIT;`;
 
@@ -287,9 +344,11 @@ function readRoutingCatalog(snapshot, source) {
   if (!applied && snapshot.receipts.some(({ name }) => name > ROUTING_INDEX_TARGET.migration)) {
     // FLAG: A later receipt can precede the optional index only for the exact reviewed
     // giveaway prefix. A failed or rolled-back attempt never authorizes replay or skipping.
-    const tail = active.has(PUBLISHER_DEFERRAL_MIGRATION.name)
-      ? PUBLISHER_DEFERRAL_MIGRATIONS
-      : GIVEAWAY_DEFERRAL_MIGRATIONS;
+    const tail = SPAMMER_DEFERRAL_MIGRATIONS.some(({ name }) => active.has(name))
+      ? spammerDeferralTail
+      : active.has(PUBLISHER_DEFERRAL_MIGRATION.name)
+        ? PUBLISHER_DEFERRAL_MIGRATIONS
+        : GIVEAWAY_DEFERRAL_MIGRATIONS;
     assertDeferralSource(source, false, tail);
     if (snapshot.orderedIndex?.present !== true || snapshot.orderedIndex.exact !== true)
       fail('GIVEAWAY_DEFERRAL_ORDERED_INDEX_REQUIRED');
@@ -330,6 +389,8 @@ function readRoutingCatalog(snapshot, source) {
   }
   if (!applied && active.has(PUBLISHER_DEFERRAL_MIGRATION.name))
     assertPublisherSchema(snapshot, active);
+  if (!applied && SPAMMER_DEFERRAL_MIGRATIONS.some(({ name }) => active.has(name)))
+    assertSpammerSchema(snapshot, active);
   return { active, applied };
 }
 
@@ -365,13 +426,28 @@ function assertPublisherSchema(snapshot, active) {
   }
 }
 
+function assertSpammerSchema(snapshot, active) {
+  const [column, index] = SPAMMER_DEFERRAL_MIGRATIONS;
+  if (
+    snapshot.spammerSchema?.column !== (active.has(column.name) ? 'exact' : 'absent') ||
+    snapshot.spammerSchema?.index !== (active.has(index.name) ? 'exact' : 'absent')
+  )
+    fail('SPAMMER_DEFERRAL_SCHEMA_INVALID');
+}
+
 function verifyDeferralState(snapshot, source, tail, preparation) {
   assertDeferralSource(source, true, tail);
   const { active, applied } = readRoutingCatalog(snapshot, source);
   if (applied || snapshot.orderedIndex?.present !== true || snapshot.orderedIndex.exact !== true)
     fail('GIVEAWAY_DEFERRAL_STATE_INVALID');
   assertGiveawaySchema(snapshot, active);
-  if (tail === PUBLISHER_DEFERRAL_MIGRATIONS) assertPublisherSchema(snapshot, active);
+  if (tail === PUBLISHER_DEFERRAL_MIGRATIONS || tail === spammerDeferralTail)
+    assertPublisherSchema(snapshot, active);
+  if (tail === spammerDeferralTail) {
+    if (PUBLISHER_DEFERRAL_MIGRATIONS.some(({ name }) => !active.has(name)))
+      fail('SPAMMER_DEFERRAL_PREREQUISITE_MISSING');
+    assertSpammerSchema(snapshot, active);
+  }
   const pending = tail.map(({ name }) => name).filter((name) => !active.has(name));
   return { state: pending.length ? preparation : 'compatible_pending', pending };
 }
@@ -392,6 +468,14 @@ export function verifyPublisherDeferralState(snapshot, source) {
     PUBLISHER_DEFERRAL_MIGRATIONS,
     'prepare_publisher_deferral',
   );
+}
+
+export function assertSpammerDeferralSource(source) {
+  assertDeferralSource(source, true, spammerDeferralTail);
+}
+
+export function verifySpammerDeferralState(snapshot, source) {
+  return verifyDeferralState(snapshot, source, spammerDeferralTail, 'prepare_spammer_deferral');
 }
 
 export function verifyRoutingIndexState(snapshot, source) {

@@ -1,10 +1,18 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
-import { createRoutingIndexOnlineClientLauncher } from './multibot-online-client.mjs';
+import {
+  createRoutingIndexOnlineClientLauncher,
+  createSpammerProjectionOnlineClientLauncher,
+} from './multibot-online-client.mjs';
 import { installMultibotOutputFence } from './multibot-online-supervisor.mjs';
 import { prepareOutcomeCohortIndexes } from './outcome-cohort-online-supervisor.mjs';
 import { readRoutingIndexState } from './routing-index-online-state.mjs';
-import { checkRoutingIndexPrepareCapacity } from './routing-index-prepare-capacity.mjs';
+import {
+  checkRoutingIndexPrepareCapacity,
+  checkSpammerProjectionPrepareCapacity,
+  readSpammerProjectionPrepareState,
+  validateSpammerReleaseIdentity,
+} from './routing-index-prepare-capacity.mjs';
 
 export function routingIndexFailureCode(error) {
   const message = error?.message ?? '';
@@ -26,6 +34,29 @@ export async function prepareRoutingIndex(composeArgs, options = {}) {
   });
 }
 
+export async function prepareSpammerProjection(sha, composeArgs, options = {}) {
+  const env = options.env ?? process.env;
+  validateSpammerReleaseIdentity(sha, env);
+  return prepareOutcomeCohortIndexes(composeArgs, {
+    ...options,
+    readState: (args, stateOptions) =>
+      readSpammerProjectionPrepareState(sha, args, {
+        ...stateOptions,
+        env,
+        readReleaseState: options.readReleaseState,
+      }),
+    checkCapacity: (args, capacityOptions) =>
+      (options.checkCapacity ?? checkSpammerProjectionPrepareCapacity)(sha, args, {
+        ...capacityOptions,
+        env,
+        readReleaseState: options.readReleaseState,
+      }),
+    createLauncher: options.createLauncher ?? createSpammerProjectionOnlineClientLauncher,
+    stage: 'spammer_projection_prepare',
+    failureCode: routingIndexFailureCode,
+  });
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const uninstall = installMultibotOutputFence();
   try {
@@ -37,6 +68,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
       await prepareRoutingIndex(args, {
         onProgress: (event) => console.log(JSON.stringify(event)),
       });
+    } else if (mode === 'preflight-spammer' || mode === 'prepare-spammer') {
+      const [sha, ...composeArgs] = args;
+      if (mode === 'preflight-spammer') {
+        const result = await checkSpammerProjectionPrepareCapacity(sha, composeArgs);
+        console.log(JSON.stringify({ stage: 'spammer_projection_preflight', ...result }));
+      } else {
+        await prepareSpammerProjection(sha, composeArgs, {
+          onProgress: (event) => console.log(JSON.stringify(event)),
+        });
+      }
     } else throw new Error('ROUTING_INDEX_ARGUMENTS_INVALID');
   } catch (error) {
     console.error(

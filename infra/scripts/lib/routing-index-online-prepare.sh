@@ -17,6 +17,9 @@ maxim_routing_index_preflight() {
   maxim_routing_index_release_state "$target_sha" "$2" state || return
   case "$state" in
     already_applied|compatible_pending|prepare_giveaway_deferral|prepare_publisher_deferral) return 0 ;;
+    prepare_spammer_deferral)
+      node "$ROOT_DIR/infra/scripts/routing-index-online-supervisor.mjs" preflight-spammer "$target_sha" "${routing_preflight_compose_ref[@]}"
+      ;;
     prepare_routing)
       node "$ROOT_DIR/infra/scripts/routing-index-online-supervisor.mjs" preflight "${routing_preflight_compose_ref[@]}"
       ;;
@@ -35,6 +38,13 @@ maxim_routing_index_prepare() {
       # The caller reads the variable assigned through this name reference.
       # shellcheck disable=SC2034
       routing_prepare_out="$routing_prepare_state"
+      ;;
+    prepare_spammer_deferral)
+      ensure_compose_env || return
+      maxim_require_ordinary_effect_authority "$ROOT_DIR" || return
+      MAXIM_MIGRATION_API_IMAGE="$MAXIM_API_IMAGE" \
+        node "$ROOT_DIR/infra/scripts/routing-index-online-supervisor.mjs" prepare-spammer "$target_sha" "${MIGRATION_COMPOSE_FILES[@]}" >&2 || return
+      maxim_routing_index_require_release "$target_sha" MIGRATION_COMPOSE_FILES compatible_pending "$2"
       ;;
     prepare_giveaway_deferral|prepare_publisher_deferral)
       local deferral_argument=--giveaway-deferral

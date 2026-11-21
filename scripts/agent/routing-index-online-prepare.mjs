@@ -13,7 +13,9 @@ import {
 import {
   GIVEAWAY_DEFERRAL_MIGRATIONS,
   PUBLISHER_DEFERRAL_MIGRATIONS,
+  SPAMMER_DEFERRAL_MIGRATIONS,
   verifyPublisherDeferralState,
+  verifySpammerDeferralState,
   routingIndexStateSql,
   verifyGiveawayDeferralState,
   verifyRoutingIndexState,
@@ -64,6 +66,18 @@ export default defineConfig({
   }
 }
 
+function createSpammerDeferralPrismaEnvironment(env) {
+  // FLAG: Caller-provided session options are rejected before adding these fixed limits.
+  // Prisma forwards the URL's options to PostgreSQL; PGOPTIONS does not reach its migration session.
+  const database = new URL(env.DATABASE_URL);
+  database.searchParams.set(
+    'options',
+    '-c lock_timeout=5s -c statement_timeout=45s -c temp_file_limit=256MB ' +
+      '-c maintenance_work_mem=64MB -c max_parallel_maintenance_workers=0',
+  );
+  return { ...env, DATABASE_URL: database.toString() };
+}
+
 async function readState(databaseUrl, source, verify = verifyRoutingIndexState) {
   const { default: pg } = await import('pg');
   const client = new pg.Client({
@@ -89,32 +103,41 @@ export async function runRoutingIndexOnlinePrepare({
   runPrisma = spawnSync,
   giveawayDeferral = false,
   publisherDeferral = false,
+  spammerDeferral = false,
 } = {}) {
-  if (giveawayDeferral && publisherDeferral) throw new Error('ROUTING_INDEX_ARGUMENTS_INVALID');
-  const deferral = giveawayDeferral || publisherDeferral;
-  if (!env.DATABASE_URL?.trim() || (!deferral && !env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME))
+  if ([giveawayDeferral, publisherDeferral, spammerDeferral].filter(Boolean).length > 1)
+    throw new Error('ROUTING_INDEX_ARGUMENTS_INVALID');
+  const deferral = giveawayDeferral || publisherDeferral || spammerDeferral;
+  if (
+    !env.DATABASE_URL?.trim() ||
+    ((!deferral || spammerDeferral) && !env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME)
+  )
     throw new Error('ROUTING_INDEX_TAGGED_DATABASE_REQUIRED');
   verifyRoutingIndexDatabaseUrl(env.DATABASE_URL);
   if (Object.hasOwn(env, 'PGOPTIONS')) throw new Error('ROUTING_INDEX_DATABASE_OPTIONS_BLOCKED');
   const prepareEnv = createMultibotPrepareEnvironment(
-    deferral
+    deferral && !spammerDeferral
       ? { ...env, MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME: `maxim-online-${randomUUID()}` }
       : env,
   );
   const source = readRoutingIndexSource(root);
-  const verify = publisherDeferral
-    ? verifyPublisherDeferralState
-    : giveawayDeferral
-      ? verifyGiveawayDeferralState
-      : verifyRoutingIndexState;
+  const verify = spammerDeferral
+    ? verifySpammerDeferralState
+    : publisherDeferral
+      ? verifyPublisherDeferralState
+      : giveawayDeferral
+        ? verifyGiveawayDeferralState
+        : verifyRoutingIndexState;
   const complete = deferral ? 'compatible_pending' : 'already_applied';
   const before = await inspect(prepareEnv.DATABASE_URL, source, verify);
   if (before.state === complete) return { state: complete };
-  const expected = publisherDeferral
-    ? 'prepare_publisher_deferral'
-    : giveawayDeferral
-      ? 'prepare_giveaway_deferral'
-      : 'prepare_routing';
+  const expected = spammerDeferral
+    ? 'prepare_spammer_deferral'
+    : publisherDeferral
+      ? 'prepare_publisher_deferral'
+      : giveawayDeferral
+        ? 'prepare_giveaway_deferral'
+        : 'prepare_routing';
   if (
     before.state !== expected ||
     (!deferral && (before.pending.length !== 1 || before.pending[0] !== 'routing'))
@@ -124,7 +147,10 @@ export async function runRoutingIndexOnlinePrepare({
   const migrations = deferral
     ? [
         ...source.filter(({ name }) => name < ROUTING_INDEX_TARGET.migration),
-        ...(publisherDeferral ? PUBLISHER_DEFERRAL_MIGRATIONS : GIVEAWAY_DEFERRAL_MIGRATIONS),
+        ...(publisherDeferral || spammerDeferral
+          ? PUBLISHER_DEFERRAL_MIGRATIONS
+          : GIVEAWAY_DEFERRAL_MIGRATIONS),
+        ...(spammerDeferral ? SPAMMER_DEFERRAL_MIGRATIONS : []),
       ]
     : source.filter(({ name }) => name <= ROUTING_INDEX_TARGET.migration);
   const prefix = createMigrationDirectory(root, migrations);
@@ -140,7 +166,7 @@ export async function runRoutingIndexOnlinePrepare({
       ],
       {
         cwd: root,
-        env: prepareEnv,
+        env: spammerDeferral ? createSpammerDeferralPrismaEnvironment(prepareEnv) : prepareEnv,
         stdio: 'ignore',
         timeout: deferral ? 60_000 : ROUTING_INDEX_TARGET.statementMs + 30_000,
       },
@@ -160,10 +186,17 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     const giveawayDeferral = process.argv.length === 3 && process.argv[2] === '--giveaway-deferral';
     const publisherDeferral =
       process.argv.length === 3 && process.argv[2] === '--publisher-deferral';
-    if (process.argv.length !== 2 && !giveawayDeferral && !publisherDeferral)
+    const spammerDeferral = process.argv.length === 3 && process.argv[2] === '--spammer-deferral';
+    if (process.argv.length !== 2 && !giveawayDeferral && !publisherDeferral && !spammerDeferral)
       throw new Error('ROUTING_INDEX_ARGUMENTS_INVALID');
     console.log(
-      JSON.stringify(await runRoutingIndexOnlinePrepare({ giveawayDeferral, publisherDeferral })),
+      JSON.stringify(
+        await runRoutingIndexOnlinePrepare({
+          giveawayDeferral,
+          publisherDeferral,
+          spammerDeferral,
+        }),
+      ),
     );
   } catch {
     console.error('ROUTING_INDEX_PREPARATION_FAILED; receipts and indexes preserved.');

@@ -30,6 +30,8 @@ import {
   GIVEAWAY_DEFERRAL_MIGRATIONS,
   PUBLISHER_DEFERRAL_MIGRATION,
   verifyPublisherDeferralState,
+  SPAMMER_DEFERRAL_MIGRATIONS,
+  verifySpammerDeferralState,
   verifyGiveawayDeferralState,
 } from '../../scripts/agent/routing-index-catalog.mjs';
 import {
@@ -174,6 +176,130 @@ test('Publisher deferral requires its exact tail after the giveaway prefix and p
         source,
       ),
     /DEFERRAL_/,
+  );
+});
+
+const spammerSource = [
+  ...giveawaySource,
+  PUBLISHER_DEFERRAL_MIGRATION,
+  ...SPAMMER_DEFERRAL_MIGRATIONS,
+];
+const spammerSnapshot = (applied) => {
+  const catalog = giveawaySnapshot(2);
+  const tail = [PUBLISHER_DEFERRAL_MIGRATION, ...SPAMMER_DEFERRAL_MIGRATIONS.slice(0, applied)];
+  return {
+    ...catalog,
+    publisherSchema: 'exact',
+    spammerSchema: {
+      column: applied >= 1 ? 'exact' : 'absent',
+      index: applied === 2 ? 'exact' : 'absent',
+    },
+    receipts: [
+      ...catalog.receipts,
+      ...tail.map((m, i) => ({
+        ...m,
+        id: 'spammer-tail-' + i,
+        steps: 1,
+        finished: true,
+        rolled_back: false,
+        started_at: `2026-11-20T00:0${i}:01Z`,
+        finished_at: `2026-11-20T00:0${i}:02Z`,
+      })),
+    ],
+  };
+};
+
+test('spammer deferral accepts only the two pinned migrations after the completed Publisher prefix', () => {
+  assert.deepEqual(source.slice(-2), SPAMMER_DEFERRAL_MIGRATIONS);
+  for (const applied of [0, 1, 2]) {
+    const input = spammerSnapshot(applied);
+    const state = applied === 2 ? 'compatible_pending' : 'prepare_spammer_deferral';
+    assert.deepEqual(verifySpammerDeferralState(input, spammerSource), {
+      state,
+      pending: SPAMMER_DEFERRAL_MIGRATIONS.slice(applied).map((m) => m.name),
+    });
+    assert.equal(
+      verifyReleaseRoutingState(input, { source: spammerSource, supportsOrdered: true }),
+      state,
+    );
+  }
+  assert.throws(
+    () =>
+      verifySpammerDeferralState(
+        {
+          ...giveawaySnapshot(2),
+          publisherSchema: 'absent',
+          spammerSchema: { column: 'absent', index: 'absent' },
+        },
+        spammerSource,
+      ),
+    /SPAMMER_DEFERRAL_PREREQUISITE_MISSING/,
+  );
+  for (const badSource of [
+    spammerSource.slice(0, -1),
+    [...spammerSource, { name: '20990101000000_future', checksum: 'b'.repeat(64) }],
+    [...spammerSource.slice(0, -1), { ...spammerSource.at(-1), checksum: 'f'.repeat(64) }],
+  ]) {
+    assert.throws(
+      () => verifySpammerDeferralState(spammerSnapshot(0), badSource),
+      /DEFERRAL_SOURCE_INVALID/,
+    );
+  }
+  assert.equal(
+    verifyReleaseRoutingState(spammerSnapshot(2), {
+      source: [...spammerSource, { name: '20990101000000_future', checksum: 'b'.repeat(64) }],
+      supportsOrdered: true,
+    }),
+    'prepare_routing',
+  );
+});
+
+test('spammer deferral refuses mismatched catalog states and failed, missing or unordered receipts', () => {
+  for (const applied of [0, 1, 2]) {
+    const snapshot = spammerSnapshot(applied);
+    for (const key of ['column', 'index']) {
+      for (const state of ['absent', 'exact', 'invalid', undefined].filter(
+        (state) => state !== snapshot.spammerSchema[key],
+      )) {
+        assert.throws(
+          () =>
+            verifySpammerDeferralState(
+              { ...snapshot, spammerSchema: { ...snapshot.spammerSchema, [key]: state } },
+              spammerSource,
+            ),
+          /SPAMMER_DEFERRAL_SCHEMA_INVALID/,
+        );
+      }
+    }
+  }
+  const both = spammerSnapshot(2);
+  const last = both.receipts.at(-1);
+  for (const bad of [
+    { steps: 0 },
+    { finished: false },
+    { rolled_back: true },
+    { checksum: 'e'.repeat(64) },
+    { started_at: '2026-11-19T00:00:00Z' },
+  ]) {
+    assert.throws(
+      () =>
+        verifySpammerDeferralState(
+          { ...both, receipts: [...both.receipts.slice(0, -1), { ...last, ...bad }] },
+          spammerSource,
+        ),
+      /RECEIPT_BLOCKED/,
+    );
+  }
+  assert.throws(
+    () =>
+      verifySpammerDeferralState(
+        {
+          ...both,
+          receipts: both.receipts.filter((r) => r.name !== SPAMMER_DEFERRAL_MIGRATIONS[0].name),
+        },
+        spammerSource,
+      ),
+    /RECEIPT_BLOCKED/,
   );
 });
 
@@ -368,6 +494,17 @@ test('release proof uses the selected commit for migration bytes, identity and c
     run: async () => assert.fail('pre-routing release must not query PostgreSQL'),
   };
   assert.equal(await readReleaseRoutingState(old, compose, rootOnly), 'not_in_target');
+  const onlySpammer = {
+    root,
+    requireSpammerDeferral: true,
+    run: async () => assert.fail('an unrelated release must be refused before a database read'),
+  };
+  for (const sha of [old, required, optional]) {
+    await assert.rejects(
+      readReleaseRoutingState(sha, compose, onlySpammer),
+      /DEFERRAL_(TARGET|SOURCE)_INVALID/u,
+    );
+  }
   assert.throws(() => readReleaseRoutingSource(root, 'HEAD'), /TARGET_INVALID/u);
   assert.throws(
     () => readReleaseRoutingSource(root, git('rev-parse', 'HEAD^{tree}')),
