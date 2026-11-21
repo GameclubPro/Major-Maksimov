@@ -143,6 +143,11 @@ export class NightModeTransitionProcessor extends WorkerHost {
         retryableError,
       );
     }
+    if (result.waitForManualOpening) {
+      if (!token || !job.id) throw new Error('Missing worker lease for deferred night cleanup');
+      await this.scheduler.parkCloseCleanup(job.data, job.id, (at) => job.moveToDelayed(at, token));
+      throw new DelayedError();
+    }
     if (job.data.recoveryOnly) {
       return;
     }

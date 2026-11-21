@@ -11,7 +11,12 @@ import {
 } from '../moderation/night-mode-transition-closed-notice-options.util';
 import { createPrismaClient, type PrismaClient } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
-import { saveChatSettings, sanitizeStoredChatSettings } from './admin-chat-settings';
+import {
+  readChatSettingsSnapshot,
+  saveChatSettings,
+  sanitizeStoredChatSettings,
+} from './admin-chat-settings';
+import { buildSettingsSectionPatch } from './admin-settings-section-patch';
 import { AdminDialogLinkHelper } from './admin-dialog-link-helper';
 import { readDialogButtonToken } from './admin-service-focused-test-support';
 import { AdminService } from './admin.service';
@@ -95,20 +100,13 @@ native('night close comments with independently saved PostgreSQL settings', () =
     await db?.$disconnect();
   });
 
-  async function saveNightComments(enabled: boolean) {
-    const row = await db.chatSettings.findUniqueOrThrow({ where: { chatId } });
-    await saveChatSettings({
+  async function saveSettings(body: unknown) {
+    return saveChatSettings({
       prisma: db as PrismaService,
       chatContextCache: cache,
       chatId,
       actorUserId: user.userId,
-      body: {
-        ...chatSettingsSchema.parse(sanitizeStoredChatSettings(row)),
-        settingsRevision: row.updatedAt.toISOString(),
-        nightModeEnabled: true,
-        nightModeBotMessageEnabled: true,
-        nightModeCommentsEnabled: enabled,
-      },
+      body,
       source: 'miniapp',
       resolveBotAssignmentData: () => ({}),
       assertRequiredSubscriptionSettings: async () => undefined,
@@ -116,8 +114,97 @@ native('night close comments with independently saved PostgreSQL settings', () =
       assertBotCapabilities: async () => undefined,
       refreshExecutionReadiness: async () => undefined,
     });
+  }
+
+  async function saveNightComments(enabled: boolean) {
+    const row = await db.chatSettings.findUniqueOrThrow({ where: { chatId } });
+    await saveSettings({
+      ...chatSettingsSchema.parse(sanitizeStoredChatSettings(row)),
+      settingsRevision: row.updatedAt.toISOString(),
+      nightModeEnabled: true,
+      nightModeBotMessageEnabled: true,
+      nightModeCommentsEnabled: enabled,
+    });
     return db.chatSettings.findUniqueOrThrow({ where: { chatId } });
   }
+
+  it.each(['active', 'expired'] as const)(
+    'saving another section preserves the %s manual deadline and command order',
+    async (mode) => {
+      const until = new Date(Date.now() + (mode === 'active' ? 60_000 : -60_000)).toISOString();
+      const previousOrder = new Date(Date.now() - 300_000);
+      await db.chat.update({ where: { id: chatId }, data: { chatControlOrderAt: previousOrder } });
+      const row = await db.chatSettings.update({
+        where: { chatId },
+        data: {
+          nightModeEnabled: true,
+          nightModeForceCloseEnabled: true,
+          nightModeForceCloseUntil: until,
+        },
+      });
+      const revision = row.updatedAt.toISOString();
+      const changes = { greetingBotMessageText: 'Добро пожаловать!' };
+      const result = await saveSettings(
+        buildSettingsSectionPatch(
+          {
+            ...chatSettingsSchema.parse(sanitizeStoredChatSettings(row)),
+            settingsRevision: revision,
+          },
+          { section: 'greeting', changes, expectedRevision: revision },
+        ),
+      );
+      const expected = {
+        ...changes,
+        nightModeEnabled: true,
+        nightModeForceCloseEnabled: mode === 'active',
+        nightModeForceCloseUntil: mode === 'active' ? until : '',
+      };
+      expect(result).toMatchObject(expected);
+      expect(await db.chatSettings.findUniqueOrThrow({ where: { chatId } })).toMatchObject(
+        expected,
+      );
+      expect(await db.chat.findUniqueOrThrow({ where: { id: chatId } })).toMatchObject({
+        chatControlOrderAt: previousOrder,
+      });
+    },
+  );
+
+  it('keeps the saved night and manual policy and media across an unrelated corrupt field on GET', async () => {
+    const policy = {
+      nightModeEnabled: true,
+      nightModeStartTimeMinutes: 1230,
+      nightModeEndTimeMinutes: 375,
+      nightModeTimezone: 'Europe/Berlin',
+      nightModeBotMessageEnabled: true,
+      nightModeOpenMessageEnabled: true,
+      nightModeCommentsEnabled: true,
+      nightModeForceCloseEnabled: true,
+      nightModeForceCloseUntil: new Date(Date.now() + 3_600_000).toISOString(),
+      botSpeechMedia: {
+        nightModeOpenMessageText: {
+          base64: 'aW1hZ2U=',
+          mimeType: 'image/jpeg',
+          fileName: 'night.jpg',
+        },
+      },
+    };
+    await db.chatSettings.update({
+      where: { chatId },
+      data: { ...policy, greetingBotMessageText: 'x'.repeat(1001) },
+    });
+    const { settings } = await readChatSettingsSnapshot({
+      prisma: db as PrismaService,
+      chatContextCache: cache,
+      chatId,
+      logger: { warn: jest.fn() },
+    });
+    const persisted = await db.chatSettings.findUniqueOrThrow({ where: { chatId } });
+    expect(settings).toMatchObject({
+      ...policy,
+      settingsRevision: persisted.updatedAt.toISOString(),
+    });
+    expect(persisted).toMatchObject(policy);
+  });
 
   async function nightToken() {
     const settings = await db.chatSettings.findUniqueOrThrow({ where: { chatId } });

@@ -69,6 +69,9 @@ function harness() {
     ensureIntent: jest.fn(async () => {
       effects.push('ensure');
     }),
+    ensureBothReasons: jest.fn(async () => {
+      effects.push('both');
+    }),
     claimAction: jest.fn(async (): Promise<boolean> => {
       effects.push('claim');
       return true;

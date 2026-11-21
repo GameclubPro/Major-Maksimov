@@ -1,3 +1,4 @@
+import type { AdminService } from '../admin/admin.service';
 import { createGroupCommandAuthorityMock } from '../common/group-command-authority.spec-support';
 import {
   createAdminForwardedRulesUpdate,
@@ -14,7 +15,12 @@ describe('mandatory GROUP command authority', () => {
       applyManualChatSilenceCommand: jest
         .fn()
         .mockResolvedValue({ ok: true, message: 'Чат закрыт.' }),
-      applyManualOpenChatCommand: jest.fn().mockResolvedValue({ ok: true, message: 'Чат открыт.' }),
+      applyManualOpenChatCommand: jest
+        .fn<
+          ReturnType<AdminService['applyManualOpenChatCommand']>,
+          Parameters<AdminService['applyManualOpenChatCommand']>
+        >()
+        .mockResolvedValue({ ok: true, message: 'Чат открыт.' }),
       adoptChatRulesFromMessage: jest.fn().mockResolvedValue({ text: 'Правила' }),
       enqueueManualGroupModerationCommand: jest.fn().mockResolvedValue(true),
       enqueueDeveloperSuperBanCommand: jest.fn().mockResolvedValue(true),
@@ -160,6 +166,67 @@ describe('mandatory GROUP command authority', () => {
       ).toBe(0);
     },
   );
+
+  it.each([
+    ['тишина 12', 'applyManualChatSilenceCommand'],
+    ['тишина выкл', 'applyManualOpenChatCommand'],
+  ] as const)(
+    'keeps a failed %s command silent without claiming an outcome',
+    async (text, method) => {
+      const peer = fixture();
+      const failure = new Error('settings transaction outcome unknown');
+      peer.manualBridge[method].mockRejectedValueOnce(failure);
+      const base = createUpdate();
+      const update = {
+        ...base,
+        botId: 'bot-1',
+        message: { ...base.message!, text, senderId: 'admin-1' },
+      };
+
+      await expect(peer.handle(update)).rejects.toBe(failure);
+
+      expect(peer.cleanup).not.toHaveBeenCalled();
+      expect(peer.maxClient.sendMessage).not.toHaveBeenCalled();
+      expect(peer.authority.prepareResult).not.toHaveBeenCalled();
+      expect(peer.authority.complete).not.toHaveBeenCalled();
+      expect(peer.authority.release).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('resumes only the committed opening notice after the settings call loses its response', async () => {
+    const authority = createGroupCommandAuthorityMock();
+    const first = fixture(authority);
+    const peer = fixture(authority);
+    const message = 'Ручное закрытие снято. Чат остаётся закрыт по ночному расписанию.';
+    const failure = new Error('connection lost after commit');
+    first.manualBridge.applyManualOpenChatCommand.mockImplementationOnce(
+      async (_chat, _actor, _source, permit) => {
+        if (!permit) throw new Error('Missing GROUP identity');
+        await authority.prepareResult(permit, {
+          action: 'OPEN_CHAT',
+          applied: true,
+          noticeText: message,
+        });
+        throw failure;
+      },
+    );
+    const base = createUpdate();
+    const update = {
+      ...base,
+      botId: 'bot-1',
+      message: { ...base.message!, text: 'тишина выкл', senderId: 'admin-1' },
+    };
+
+    await expect(first.handle(update)).rejects.toBe(failure);
+    expect(first.maxClient.sendMessage).not.toHaveBeenCalled();
+    await expect(peer.handle({ ...update, botId: 'bot-2' })).resolves.toBe(true);
+
+    expect(peer.manualBridge.applyManualOpenChatCommand).not.toHaveBeenCalled();
+    expect(peer.maxClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(peer.maxClient.sendMessage.mock.calls[0]?.[1]).toBe(message);
+    expect(authority.prepareResult).toHaveBeenCalledTimes(1);
+    expect(authority.complete).toHaveBeenCalledTimes(1);
+  });
 
   it('resumes a saved notice on the original token without replaying the settings mutation', async () => {
     const authority = createGroupCommandAuthorityMock();

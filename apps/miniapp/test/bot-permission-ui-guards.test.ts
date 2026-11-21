@@ -65,7 +65,7 @@ test('chat moderation saves roll rejected enables back before showing the dialog
 test('bulk apply keeps an already-saved source while blocking unready targets', () => {
   assert.match(
     chatSettingsSource,
-    /if \(variables\.isCurrentScope\?\.\(\) !== false\) applyTargetSavedSourceRef\.current = saved/u,
+    /if \(variables\.isCurrentScope\?\.\(\) !== false\) \{\s*applyTargetSavedSourceRef\.current = saved;/u,
   );
   assert.match(
     sectionApplySubmitSource,

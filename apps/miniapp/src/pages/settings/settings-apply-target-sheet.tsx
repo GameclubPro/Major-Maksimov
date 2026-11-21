@@ -103,8 +103,9 @@ export function SettingsApplyTargetSheet({
     preview?.sourceChatId === sheet.sourceChatId &&
     previewEpochRef.current.epoch === compositionEpoch &&
     isApplySettingsTargetPreviewCurrent(target, preview);
-  const reportsTargetLimitExceeded =
-    sheet.section === 'reports' && (preview?.appliedChatIds.length ?? 0) > 500;
+  const targetLimitExceeded =
+    (sheet.section === 'reports' || sheet.section === 'night') &&
+    (preview?.appliedChatIds.length ?? 0) > 500;
   const canConfirm =
     previewMatchesTarget &&
     !previewLoading &&
@@ -114,7 +115,7 @@ export function SettingsApplyTargetSheet({
     !favoriteChanged &&
     supportedTarget &&
     (preview?.updatedChats ?? 0) > 0 &&
-    !reportsTargetLimitExceeded;
+    !targetLimitExceeded;
   const visibleChats = previewMatchesTarget ? (preview?.sampleChats.slice(0, 4) ?? []) : [];
   const remainingChats = Math.max(0, (preview?.updatedChats ?? 0) - visibleChats.length);
   const title =
@@ -131,7 +132,7 @@ export function SettingsApplyTargetSheet({
       ? 'Откройте сохранение заново.'
       : !favoriteReady
         ? 'Не удалось подтвердить папку чата.'
-        : reportsTargetLimitExceeded
+        : targetLimitExceeded
           ? 'За раз можно сохранить настройки не более чем в 500 чатах.'
           : previewError;
   const titleId = `settings-apply-target-${sheet.section}-title`;
@@ -206,7 +207,7 @@ export function SettingsApplyTargetSheet({
             </>
           )}
         </div>
-        {error && !favoriteChanged && !reportsTargetLimitExceeded && supportedTarget ? (
+        {error && !favoriteChanged && !targetLimitExceeded && supportedTarget ? (
           <button
             type="button"
             className="button button--ghost settings-apply-target__retry"

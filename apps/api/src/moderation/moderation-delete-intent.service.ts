@@ -1059,6 +1059,44 @@ export class ModerationDeleteIntentService {
     return this.persistIntent(input, options?.enqueue !== false);
   }
 
+  async ensureClosedChatReasons(
+    manual: EnsureModerationDeleteIntentInput,
+    night: EnsureModerationDeleteIntentInput,
+  ): Promise<void> {
+    if (
+      manual.ruleCode !== 'MANUAL_GROUP_CLOSE_DELETE' ||
+      manual.reasonKey !== manual.ruleCode ||
+      night.ruleCode !== 'NIGHT_MODE_DELETE' ||
+      night.reasonKey !== night.ruleCode ||
+      manual.chatId !== night.chatId ||
+      manual.messageId !== night.messageId ||
+      !manual.subjectUserId ||
+      manual.subjectUserId !== night.subjectUserId ||
+      !manual.sourceMessageAt ||
+      !night.sourceMessageAt ||
+      new Date(manual.sourceMessageAt).getTime() !== new Date(night.sourceMessageAt).getTime() ||
+      manual.originBotId !== night.originBotId ||
+      manual.routingPolicy !== night.routingPolicy
+    )
+      throw new Error('Closed-chat DELETE reasons must refer to the same source');
+    const result = await this.prisma.$transaction(async (tx) => {
+      const first = await this.persistIntent(manual, false, tx);
+      const second = await this.persistIntent(night, false, tx);
+      if (first.intentId !== second.intentId || first.rollout !== second.rollout)
+        throw new Error('Closed-chat DELETE reasons require one durable intent');
+      return second;
+    });
+    if (!result.intentId || result.rollout !== 'execute') return;
+    try {
+      await this.enqueueCurrentWakeup(result.intentId, DELETE_QUEUE_PRIORITY_INTERACTIVE);
+    } catch (error: unknown) {
+      this.logger.warn(
+        { intentId: result.intentId, err: this.errorMessage(error) },
+        'Failed to enqueue closed-chat delete intent; DB sweeper will retry',
+      );
+    }
+  }
+
   async rearmNightModeOpenNoticeCleanup(intentId: string): Promise<void> {
     const intent = await this.loadRequiredIntent(intentId);
     if (

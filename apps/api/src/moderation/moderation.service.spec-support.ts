@@ -1020,7 +1020,12 @@ function createUpdate(sourceDate = new Date()): MaxUpdate {
     },
     raw: {
       timestamp: sourceDate.getTime(),
-      message: { timestamp: sourceDate.getTime() },
+      message: {
+        sender: { user_id: 'user-1' },
+        recipient: { chat_id: 'chat-1', chat_type: 'chat' },
+        body: { mid: 'msg-1' },
+        timestamp: sourceDate.getTime(),
+      },
     },
   };
 }

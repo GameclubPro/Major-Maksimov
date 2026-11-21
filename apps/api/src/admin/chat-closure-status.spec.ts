@@ -1,5 +1,6 @@
 import { DEFAULT_CHAT_SETTINGS } from './admin.service.support';
-import { readChatClosureStatus } from './chat-closure-status';
+import { readChatClosureStatus, readChatClosureSummary } from './chat-closure-status';
+import { ServiceUnavailableException } from '@nestjs/common';
 import { buildNightModeNoticeIdempotencyKey } from '../max/max-action-idempotency.util';
 import type { NightModeNoticeDiagnosticLedgerRow } from '../moderation/night-mode-notice-diagnostics';
 import { buildNightModeTransitionScheduleFingerprint } from '../moderation/night-mode-transition-generation.util';
@@ -108,6 +109,114 @@ describe('saved closure diagnostics', () => {
       },
     };
   }
+  it('refreshes overlapping manual and scheduled restrictions with one scoped read and no delivery history', async () => {
+    const prisma = harness();
+    const route = await prisma.chat.findUnique();
+    prisma.chat.findUnique.mockReset().mockResolvedValue({
+      ...route,
+      settings: {
+        ...settings,
+        nightModeForceCloseEnabled: true,
+        nightModeForceCloseForever: false,
+        nightModeForceCloseUntil: '2026-10-14T00:00:00.000Z',
+      },
+    });
+    const summary = await readChatClosureSummary(prisma as never, 'chat', ['bot'], now);
+    expect(summary).toEqual({
+      observedAt: now.toISOString(),
+      scheduleEnabled: true,
+      restriction: 'manual',
+      nightActive: true,
+      manualMode: 'timed',
+      timezone: 'Europe/Moscow',
+      opensAt: '2026-10-14T05:00:00.000Z',
+      nextTransitionAt: '2026-10-14T00:00:00.000Z',
+      deleteRoute: 'available',
+      notificationsEnabled: true,
+      sendRoute: 'available',
+    });
+    expect(prisma.chat.findUnique).toHaveBeenCalledTimes(1);
+    expect(prisma.chat.findUnique).toHaveBeenCalledWith({
+      where: { id: 'chat' },
+      select: expect.objectContaining({
+        settings: {
+          select: {
+            nightModeEnabled: true,
+            nightModeStartTimeMinutes: true,
+            nightModeEndTimeMinutes: true,
+            nightModeTimezone: true,
+            nightModeForceCloseEnabled: true,
+            nightModeForceCloseForever: true,
+            nightModeForceCloseUntil: true,
+            nightModeBotMessageEnabled: true,
+            nightModeOpenMessageEnabled: true,
+          },
+        },
+        botMemberships: expect.objectContaining({ where: { botId: { in: ['bot'] } } }),
+      }),
+    });
+    expect(prisma.maxActionLedgerEntry.findMany).not.toHaveBeenCalled();
+    expect(prisma.nightModeTransitionScheduledJob.findMany).not.toHaveBeenCalled();
+    expect(prisma.nightModeTransitionReconcileRequest.findUnique).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['UNKNOWN', null, 'unknown'],
+    ['STALE', { isAdmin: true, permissionsKnown: false }, 'unknown'],
+    ['DENIED', null, 'unavailable'],
+    ['CONFIRMED_ADMIN', { isAdmin: true, permissionsKnown: true, permissions: [] }, 'unavailable'],
+  ] as const)(
+    'distinguishes %s deletion rights from a confirmed restriction',
+    async (access, permissions, expected) => {
+      const prisma = harness();
+      const chat = await prisma.chat.findUnique();
+      prisma.chat.findUnique.mockResolvedValue({
+        ...chat,
+        settings,
+        fixedModeratorBotId: 'bot',
+        botMemberships: [
+          { ...chat.botMemberships[0], botAccessState: access, permissionsSnapshot: permissions },
+        ],
+      });
+      expect(
+        (await readChatClosureSummary(prisma as never, 'chat', ['bot'], now)).deleteRoute,
+      ).toBe(expected);
+    },
+  );
+
+  it('reports unavailable fixed routes independently of valid settings and an opening-only notice', async () => {
+    const prisma = harness();
+    prisma.chat.findUnique.mockResolvedValue({
+      ...(await prisma.chat.findUnique()),
+      fixedModeratorBotId: 'absent-fixed-bot',
+      settings: {
+        ...settings,
+        nightModeBotMessageEnabled: false,
+        nightModeOpenMessageEnabled: true,
+      },
+    });
+    await expect(
+      readChatClosureSummary(prisma as never, 'chat', ['bot'], now),
+    ).resolves.toMatchObject({
+      restriction: 'night',
+      manualMode: null,
+      notificationsEnabled: true,
+      sendRoute: 'unavailable',
+      deleteRoute: 'unavailable',
+    });
+  });
+
+  it.each([null, { entityType: 'CHAT', settings: null }, { entityType: 'CHANNEL', settings }])(
+    'refuses an unavailable group summary instead of guessing the chat is open',
+    async (row) => {
+      const prisma = harness();
+      prisma.chat.findUnique.mockResolvedValue(row);
+      await expect(
+        readChatClosureSummary(prisma as never, 'chat', ['bot'], now),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    },
+  );
+
   it('keeps chat deletion available with durable write access without a notice receipt', async () => {
     expect(
       await readChatClosureStatus(harness() as never, 'chat', settings, ['bot'], now),

@@ -84,8 +84,9 @@ export async function applySettingsSectionWithConfirmedSource(
   };
   onSourceSaved(savedSource);
   if (isCurrentScope?.() === false) throw new Error('Чат изменился во время сохранения.');
+  const needsConfirmedTargets = section === 'reports' || section === 'night';
   const needsSourceFence =
-    section === 'reports' || (section === 'links' && savedSourceSettings.linkRulesPolicy != null);
+    needsConfirmedTargets || (section === 'links' && savedSourceSettings.linkRulesPolicy != null);
   if (needsSourceFence && !savedSourceSettings.settingsRevision)
     throw new Error(
       'Не удалось подтвердить сохранённые настройки. Обновите экран перед применением.',
@@ -99,7 +100,7 @@ export async function applySettingsSectionWithConfirmedSource(
     needsSourceFence
       ? {
           expectedSourceSettingsRevision: savedSourceSettings.settingsRevision!,
-          ...(section === 'reports'
+          ...(needsConfirmedTargets
             ? { confirmedTargetChatIds: confirmedTargetChatIds ?? [] }
             : {}),
         }

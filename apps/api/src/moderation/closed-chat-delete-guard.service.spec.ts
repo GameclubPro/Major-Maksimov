@@ -93,17 +93,25 @@ describe('closed-chat final delete authority', () => {
     },
   );
 
-  function voiceFixture() {
+  function voiceFixture(eventOffsetMs = 0) {
     const h = fixture();
+    const eventAt = sourceAt.getTime() + eventOffsetMs;
+    const raw = {
+      update_type: 'message_created',
+      timestamp: eventAt,
+      message: { ...h.row, body: { mid: 'm1', attachments: [{ type: 'audio' }] } },
+    };
     const stored = {
       userId: 'u1',
-      sourceAt,
-      deadlineAt: new Date(sourceAt.getTime() + 300_000),
+      sourceAt: new Date(eventAt),
+      deadlineAt: new Date(eventAt + 300_000),
+      raw,
+      receiptBotId: 'bot-1',
       receiptId: 'authenticated-receipt',
       invalidatedAt: null as Date | null,
     };
-    const read = jest.fn(async () => stored as typeof stored | null);
-    Object.assign(h.prisma, { moderationVoiceSource: { findUnique: read } });
+    const read = jest.fn(async () => [stored]);
+    Object.assign(h.prisma, { $queryRaw: read });
     const bound = bindStateVoiceSource(
       {
         ...input,
@@ -116,7 +124,7 @@ describe('closed-chat final delete authority', () => {
         chatId: input.chatId,
         messageId: input.messageId,
         userId: input.subjectUserId,
-        sourceAtMs: sourceAt.getTime(),
+        sourceAtMs: eventAt,
         deadlineAtMs: stored.deadlineAt.getTime(),
       },
     );
@@ -134,6 +142,31 @@ describe('closed-chat final delete authority', () => {
     expect(h.read).toHaveBeenCalledTimes(2);
     expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
   });
+  it.each([-20_000, 20_000])(
+    'binds both voice clocks to the original receipt, offset %i',
+    async (offset) => {
+      const h = voiceFixture(offset);
+      await expect(h.guard.authorize(h.voiceInput)).resolves.toMatchObject({
+        reasonKeys: ['night'],
+        deadlineAtMs: sourceAt.getTime() + 300_000 + Math.min(offset, 0),
+      });
+      expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
+      h.stored.raw.message.timestamp++;
+      await expect(h.guard.authorize(h.voiceInput)).rejects.toMatchObject({
+        code: 'closed_chat_delete_no_longer_authorized',
+      });
+    },
+  );
+
+  it('rejects an old single-clock binding when the receipt proves an earlier creation', async () => {
+    const h = voiceFixture();
+    h.stored.raw.message.timestamp -= 30_000;
+    await expect(h.guard.authorize(h.voiceInput)).rejects.toMatchObject({
+      code: 'closed_chat_delete_no_longer_authorized',
+    });
+    expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
+  });
+
   it.each([
     'missing',
     'edited',
@@ -146,7 +179,7 @@ describe('closed-chat final delete authority', () => {
     'opened',
   ])('refuses native voice after %s', async (change) => {
     const h = voiceFixture();
-    if (change === 'missing') h.read.mockResolvedValue(null);
+    if (change === 'missing') h.read.mockResolvedValue([]);
     if (change === 'edited') h.stored.invalidatedAt = new Date();
     if (change === 'author') h.stored.userId = 'other';
     if (change === 'time') h.stored.sourceAt = new Date(0);
@@ -301,6 +334,26 @@ describe('closed-chat final delete authority', () => {
     h.settings.nightModeForceCloseUntil = reason.metadata.closeUntil;
     jest.setSystemTime(now + 30_000);
     await expect(h.guard.authorize({ ...input, reasons: [reason] })).rejects.toMatchObject({
+      code: 'closed_chat_delete_no_longer_authorized',
+    });
+  });
+
+  it('keeps continuous closure across local midnight within the original message deadline', async () => {
+    const h = fixture();
+    jest.setSystemTime(new Date('2026-10-05T00:01:00Z'));
+    const posted = new Date('2026-10-04T23:59:00Z');
+    h.row.timestamp = posted.getTime();
+    h.settings.nightModeStartTimeMinutes = h.settings.nightModeEndTimeMinutes = 480;
+    const reason = {
+      ...nightReason,
+      metadata: { ...nightReason.metadata, nightModeStartTime: '08:00' },
+    };
+    const attempt = { ...input, sourceMessageAt: posted, reasons: [reason] };
+    await expect(h.guard.authorize(attempt)).resolves.toMatchObject({
+      deadlineAtMs: posted.getTime() + 300_000,
+    });
+    h.settings.chat.chatControlOrderAt = new Date('2026-10-05T00:00:00Z');
+    await expect(h.guard.authorize(attempt)).rejects.toMatchObject({
       code: 'closed_chat_delete_no_longer_authorized',
     });
   });

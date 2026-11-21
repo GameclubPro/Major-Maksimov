@@ -6,6 +6,7 @@ import {
   chatRulesSchema,
   chatSettingsSchema,
   chatSettingsScreenResponseSchema,
+  chatClosureSummarySchema,
   domainAllowlistEntrySchema,
   publishChatRulesResultSchema,
   publishChatRulesRequestSchema,
@@ -174,6 +175,15 @@ export async function promoteChatStandbyBot(
 export async function getSettings(api: ApiTransport, chatId: string): Promise<ChatSettings> {
   const response = await api.request(`/chats/${chatId}/settings`);
   return chatSettingsSchema.parse(response);
+}
+
+export async function getChatClosureSummary(
+  api: ApiTransport,
+  chatId: string,
+  signal?: AbortSignal,
+) {
+  const response = await api.request(`/chats/${chatId}/closure-status`, { signal });
+  return chatClosureSummarySchema.parse(response);
 }
 
 export async function getSettingsScreen(
@@ -351,7 +361,7 @@ export async function applySettingsSectionToAll(
   const requestBody = {
     section,
     ...(section === 'stopWords' ? { expectedSourceRevision } : {}),
-    ...(section === 'reports'
+    ...(section === 'reports' || section === 'night'
       ? confirmedSource
       : section === 'links' && confirmedSource
         ? { expectedSourceSettingsRevision: confirmedSource.expectedSourceSettingsRevision }

@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   chatSettingsSchema,
   type ChatClosureStatus,
+  type ChatClosureSummary,
   type NightModeNoticeObservation,
 } from '@maxim/contracts/settings';
 import SettingsChatClosureStatus from '../src/pages/settings/settings-chat-closure-status';
@@ -48,7 +49,7 @@ function status(): ChatClosureStatus {
     },
   };
 }
-function render(value: ChatClosureStatus, refreshFailed = false) {
+function render(value: ChatClosureStatus | ChatClosureSummary, refreshFailed = false) {
   return renderToStaticMarkup(
     createElement(SettingsChatClosureStatus, { status: value, refreshFailed }),
   );
@@ -77,6 +78,26 @@ test('closed chat shows its next opening in the saved timezone', () => {
   const html = render(value);
   assert.match(html, /Чат закрыт/);
   assert.match(html, /Открытие: 31 октября.*07:00/);
+});
+test('overlapping restrictions show both reasons, an indefinite term and unverified rights', () => {
+  const summary: ChatClosureSummary = {
+    observedAt: status().observedAt,
+    scheduleEnabled: true,
+    restriction: 'manual',
+    nightActive: true,
+    manualMode: 'forever',
+    timezone: 'Europe/Moscow',
+    opensAt: null,
+    nextTransitionAt: null,
+    deleteRoute: 'unknown',
+    notificationsEnabled: true,
+    sendRoute: 'unknown',
+  };
+  const html = render(summary);
+  assert.match(html, /Чат закрыт вручную и по расписанию/);
+  assert.match(html, /Без срока/);
+  assert.match(html, /Не удалось проверить право бота удалять/);
+  assert.match(html, /Не удалось проверить право бота отправлять/);
 });
 test('missing bot permissions keep an actionable error for deletion and enabled notices', () => {
   const value = status();
@@ -133,7 +154,7 @@ test('refresh delay follows the saved next boundary and bounds stale or distant 
     '2026-10-29T12:00:00.000Z',
     '2026-10-31T12:00:00.000Z',
   ]) {
-    assert.equal(getNightStatusRefreshDelay(boundary, now), 60_000);
+    assert.equal(getNightStatusRefreshDelay(boundary, now), 300_000);
   }
 });
 test('preview exposes independent switches with no fabricated historical sends', () => {

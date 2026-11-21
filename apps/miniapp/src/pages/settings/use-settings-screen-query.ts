@@ -1,18 +1,97 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import type { ChatClosureStatus, ChatClosureSummary } from '@maxim/contracts/settings';
 import { useQuery } from '@tanstack/react-query';
 import type { ApiTransport } from '../../lib/api/transport';
-import { getSettingsScreen } from '../../lib/api/chat-settings-client';
-import { isTerminalApiClientError, shouldRetryTransientApiError } from '../../lib/api-retry';
+import { getChatClosureSummary, getSettingsScreen } from '../../lib/api/chat-settings-client';
+import {
+  getApiErrorStatus,
+  isTerminalApiClientError,
+  shouldRetryTransientApiError,
+} from '../../lib/api-retry';
 import { getNavigationAllowlistRefreshInterval } from './settings-link-allowlist';
+
+const NIGHT_REFRESH_FALLBACK_MS = 5 * 60_000;
 
 export function getNightStatusRefreshDelay(
   nextTransitionAt: string | null | undefined,
-  now = Date.now(),
+  observedAt: number,
 ) {
   const boundary = nextTransitionAt ? Date.parse(nextTransitionAt) : NaN;
-  return Number.isFinite(boundary) && boundary > now
-    ? Math.min(60_000, Math.max(1_000, boundary - now + 250))
-    : 60_000;
+  const delay = boundary - observedAt;
+  return Number.isFinite(delay) && delay > 0
+    ? Math.min(NIGHT_REFRESH_FALLBACK_MS, Math.max(1_000, delay + 250))
+    : NIGHT_REFRESH_FALLBACK_MS;
+}
+
+export const chatClosureQueryKey = (chatId: string | undefined, principal?: string | null) =>
+  ['chat-closure-status', chatId, principal ?? null] as const;
+
+export function useChatClosureSummary({
+  api,
+  chatId,
+  principal,
+  enabled,
+}: {
+  api: ApiTransport;
+  chatId: string | undefined;
+  principal?: string | null;
+  enabled: boolean;
+}) {
+  const query = useQuery({
+    queryKey: chatClosureQueryKey(chatId, principal),
+    enabled: Boolean(chatId && enabled),
+    retry: false,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    queryFn: async ({ signal }): Promise<ChatClosureSummary | ChatClosureStatus | null> => {
+      try {
+        return await getChatClosureSummary(api, chatId!, signal);
+      } catch (error) {
+        // FLAG: A newer mini app can open against a previous API image during rollback.
+        // Only an absent endpoint permits the existing admin-protected full-screen read.
+        if (getApiErrorStatus(error) !== 404) throw error;
+        return (await getSettingsScreen(api, chatId!, { signal })).closure ?? null;
+      }
+    },
+  });
+  const terminal = isTerminalApiClientError(query.error);
+  const lastRequested = useRef(-Infinity);
+  const refetch = query.refetch;
+  const observed = query.data?.observedAt;
+  const boundary = query.data?.nextTransitionAt;
+  useEffect(() => {
+    if (!chatId || !enabled || terminal) return;
+    const refresh = () => {
+      if (document.visibilityState === 'hidden' || Date.now() - lastRequested.current < 750) return;
+      lastRequested.current = Date.now();
+      void refetch({ cancelRefetch: false, throwOnError: false });
+    };
+    // FLAG: Use the saved server clock and the client's elapsed time since receipt. A phone
+    // clock in a different timezone or with significant skew cannot move the saved boundary.
+    const timer = setTimeout(
+      refresh,
+      getNightStatusRefreshDelay(boundary, Date.parse(observed ?? '')),
+    );
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [
+    chatId,
+    principal,
+    enabled,
+    terminal,
+    boundary,
+    observed,
+    query.dataUpdatedAt,
+    query.errorUpdatedAt,
+    refetch,
+  ]);
+  return query;
 }
 
 export function useSettingsScreenQuery({
@@ -47,53 +126,5 @@ export function useSettingsScreenQuery({
         }
       : {}),
   });
-  const boundary = query.data?.closure?.nextTransitionAt;
-  const refetch = query.refetch;
-  const terminalError = isTerminalApiClientError(query.error);
-  useEffect(() => {
-    if (!chatId || !expandedSections.night || terminalError) return;
-    let disposed = false;
-    let pending = false;
-    let lastRequested = -Infinity;
-    let timer: ReturnType<typeof setTimeout>;
-    const refresh = async () => {
-      if (
-        disposed ||
-        pending ||
-        document.visibilityState === 'hidden' ||
-        Date.now() - lastRequested < 750
-      )
-        return;
-      pending = true;
-      lastRequested = Date.now();
-      try {
-        await refetch({ cancelRefetch: false, throwOnError: false });
-      } finally {
-        pending = false;
-      }
-    };
-    const schedule = () => {
-      timer = setTimeout(() => {
-        void refresh().finally(() => {
-          if (!disposed) schedule();
-        });
-      }, getNightStatusRefreshDelay(boundary));
-    };
-    const onReturn = () => {
-      void refresh();
-    };
-    // FLAG: Only saved server boundaries schedule reads. Refresh never hydrates a dirty
-    // settings draft itself; useSettingsDraft retains that separate write boundary.
-    void refresh();
-    schedule();
-    window.addEventListener('focus', onReturn);
-    document.addEventListener('visibilitychange', onReturn);
-    return () => {
-      disposed = true;
-      clearTimeout(timer);
-      window.removeEventListener('focus', onReturn);
-      document.removeEventListener('visibilitychange', onReturn);
-    };
-  }, [chatId, expandedSections.night, boundary, refetch, terminalError]);
   return query;
 }

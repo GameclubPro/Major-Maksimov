@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { createMultibotHarness } from '../webhook/webhook-multibot-fullpath.spec-support';
+import { WebhookParser } from '../webhook/webhook.parser';
 import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import { createPrismaClient, type PrismaClient } from '../prisma/prisma-client';
@@ -85,6 +87,12 @@ const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() || process.env.REDIS_U
         botId: null,
       }));
       const dependencies: ClosedChatMessageDependencies = {
+        ensureBothReasons: async (manual, night) => {
+          await intents.ensureClosedChatReasons(
+            { ...manual, originBotId: 'fixture-bot', routingPolicy: 'origin_only' },
+            { ...night, originBotId: 'fixture-bot', routingPolicy: 'origin_only' },
+          );
+        },
         ensureIntent: async (input) => {
           // FLAG: Production composition adds the active bot route before intent persistence.
           await intents.ensureIntent({
@@ -198,4 +206,87 @@ const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() || process.env.REDIS_U
       expect((await row('after-claim')).attemptCount).toBe(1);
     });
   },
+);
+
+(databaseUrl && redisUrl ? it : it.skip)(
+  'keeps the night reason from one real receipt when the manual timer expires before dispatch',
+  async () => {
+    const h = await createMultibotHarness({ databaseUrl, redisUrl, bots: 1, mode: 'on' });
+    try {
+      await h.pause();
+      await h.deleteQueue.pause();
+      const [chatId] = await h.seedCatalog(1, {
+        nightModeEnabled: true,
+        nightModeStartTimeMinutes: 0,
+        nightModeEndTimeMinutes: 0,
+        nightModeTimezone: 'UTC',
+        nightModeForceCloseEnabled: true,
+        nightModeForceCloseForever: false,
+        nightModeForceCloseHours: 1,
+      });
+      const original = Date.now() - 1_000;
+      const until = Date.now() + 5_000;
+      await h.prisma.chatSettings.update({
+        where: { chatId: chatId! },
+        data: {
+          nightModeForceCloseUntil: new Date(until).toISOString(),
+        },
+      });
+      const messageId = randomUUID();
+      const row = {
+        sender: { user_id: 'fixture-user', is_bot: false },
+        recipient: { chat_id: chatId!, chat_type: 'chat' },
+        timestamp: original,
+        body: { mid: messageId, text: 'hello' },
+      };
+      h.messages.set(messageId, row);
+      const parsed = new WebhookParser().parse(
+        {
+          update_type: 'message_created',
+          update_id: randomUUID(),
+          timestamp: original + 500,
+          message: row,
+        },
+        { botId: h.bots[0]!.id },
+      );
+      const receipt = (await h.ingress.storeReceipt(parsed, null)).webhookEventId!;
+      h.receiptIds.push(receipt);
+      await h.ingress.preparePersistedWebhookEvent(receipt);
+      const where = { chatId_messageId: { chatId: chatId!, messageId } };
+      // FLAG: Stop the inline waiter after both reasons commit. A restarted worker below
+      // performs the real guarded dispatch against the harness's isolated MAX adapter.
+      jest.spyOn(h.intents, 'ensureAndAttempt').mockImplementationOnce(async () => ({
+        confirmed: false,
+        kind: 'pending',
+        status: 'PENDING',
+        intentId: (await h.prisma.moderationDeleteIntent.findUniqueOrThrow({ where })).id,
+      }));
+      await h.moderation.processWebhookEvent(receipt);
+      const intent = await h.prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where,
+        include: { reasons: true },
+      });
+      expect(intent.sourceMessageAt?.getTime()).toBe(original);
+      expect(intent.reasons.map((reason) => reason.ruleCode).sort()).toEqual([
+        'MANUAL_GROUP_CLOSE_DELETE',
+        'NIGHT_MODE_DELETE',
+      ]);
+      expect(h.effects.filter((effect) => effect.method === 'delete')).toHaveLength(0);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, until - Date.now() + 5)));
+      expect(await h.intents.attemptIntent(intent.id)).toMatchObject({ kind: 'confirmed' });
+      expect(await h.intents.attemptIntent(intent.id)).toMatchObject({ kind: 'confirmed' });
+      expect(
+        h.effects.filter((effect) => effect.method === 'delete' && effect.messageId === messageId),
+      ).toHaveLength(1);
+      const events = await h.prisma.moderationEvent.findMany({
+        where: { chatId, messageId, action: 'DELETE_MESSAGE' },
+        select: { ruleCode: true },
+      });
+      expect(events).toEqual([{ ruleCode: 'NIGHT_MODE_DELETE' }]);
+    } finally {
+      jest.restoreAllMocks();
+      await h.dispose();
+    }
+  },
+  40_000,
 );

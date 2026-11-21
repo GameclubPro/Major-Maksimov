@@ -24,6 +24,7 @@ import {
 import {
   parseNightModeTransitionSessionKey,
   resolveEffectiveChatClosure,
+  resolveNightModeNoticeCatchUpWindow,
   resolveNightModeTransitionSnapshot as resolveNightModeTransitionSnapshotValue,
   resolveNightModeTransitionSessionOpenAt,
   type NightModeTransitionSnapshot,
@@ -566,7 +567,7 @@ export class NightModeTransitionRuntimeService {
     if (!snapshot.isOpenBoundary) {
       return NIGHT_MODE_TRANSITION_PROCESS_CONTINUE;
     }
-    const currentSettings = await this.readCurrentSideEffectSettings(settings.chatId, snapshot);
+    const currentSettings = await this.readCurrentScheduledSettings(settings.chatId, snapshot);
     if (!currentSettings) {
       return NIGHT_MODE_TRANSITION_PROCESS_CONTINUE;
     }
@@ -588,6 +589,8 @@ export class NightModeTransitionRuntimeService {
       scheduleFingerprint: buildNightModeTransitionScheduleFingerprint(currentSettings),
       sideEffectFingerprint: buildNightModeTransitionSideEffectFingerprint(currentSettings),
     });
+    if (resolveEffectiveChatClosure(currentSettings).manual.active)
+      return NIGHT_MODE_TRANSITION_PROCESS_CONTINUE;
     const state = await this.readNightModeTransitionState(settings.chatId);
     const alreadyOpen = state?.status === 'open' && state.sessionKey === snapshot.sessionKey;
     const eventExists = await this.hasPersistedOpenNotice(settings.chatId, snapshot.sessionKey);
@@ -646,7 +649,7 @@ export class NightModeTransitionRuntimeService {
       throw new Error(`${NIGHT_MODE_TRANSITION_LOCK_BUSY_FAILURE_PREFIX} (${chatId})`);
     }
     try {
-      const settings = await this.readCurrentSideEffectSettings(chatId, snapshot);
+      const settings = await this.readCurrentScheduledSettings(chatId, snapshot);
       const fence: NightModeTransitionExecutionFence = {
         transition: 'open',
         chatId,
@@ -705,6 +708,9 @@ export class NightModeTransitionRuntimeService {
         throw new NightModeRecoveryUnsafeError(
           `Exact night mode closing receipt is not proven for cleanup (${chatId})`,
         );
+      }
+      if (resolveEffectiveChatClosure(settings).manual.active) {
+        return { shouldEnqueueNext: false, waitForManualOpening: true };
       }
       await this.assertNightModeTransitionLock(lock, chatId);
       const result = await hooks.deleteClosedNotice(
@@ -795,6 +801,20 @@ export class NightModeTransitionRuntimeService {
     chatId: string,
     expectedSnapshot: NightModeTransitionSnapshot,
   ): Promise<NightModeTransitionRuntimeSettings | null> {
+    const settings = await this.readCurrentScheduledSettings(chatId, expectedSnapshot);
+    if (
+      settings &&
+      expectedSnapshot.status === 'open' &&
+      resolveEffectiveChatClosure(settings).manual.active
+    )
+      return null;
+    return settings;
+  }
+
+  private async readCurrentScheduledSettings(
+    chatId: string,
+    expectedSnapshot: NightModeTransitionSnapshot,
+  ): Promise<NightModeTransitionRuntimeSettings | null> {
     if (typeof this.prisma.chatSettings?.findUnique !== 'function') {
       return null;
     }
@@ -816,9 +836,6 @@ export class NightModeTransitionRuntimeService {
       },
     });
     if (!settings?.nightModeEnabled || settings.chat?.entityType !== ChatEntityType.CHAT) {
-      return null;
-    }
-    if (expectedSnapshot.status === 'open' && resolveEffectiveChatClosure(settings).manual.active) {
       return null;
     }
 
@@ -1197,7 +1214,16 @@ export class NightModeTransitionRuntimeService {
       await this.assertNightModeTransitionLock(lock, settings.chatId);
       return await hooks.sendOpenedNotice(settings, snapshot, async () => {
         await this.assertNightModeTransitionLock(lock, settings.chatId);
-        return this.isCurrentSideEffectGeneration(settings, snapshot, executionFence);
+        if (!(await this.isCurrentSideEffectGeneration(settings, snapshot, executionFence)))
+          return false;
+        const dueAt = resolveNightModeTransitionSessionOpenAt(snapshot.sessionKey);
+        return (
+          dueAt !== null &&
+          resolveNightModeNoticeCatchUpWindow(
+            { transition: 'open', dueAt, sessionKey: snapshot.sessionKey },
+            settings,
+          ).state === 'within_window'
+        );
       });
     } catch (error: unknown) {
       if (

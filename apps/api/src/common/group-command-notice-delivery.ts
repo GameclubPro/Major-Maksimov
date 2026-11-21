@@ -35,7 +35,7 @@ export async function deliverGroupCommandNotice(params: {
   permit: GroupCommandPermit;
   settings: Pick<ChatSettings, 'deleteBotMessagesEnabled' | 'deleteBotMessagesDelayMinutes'>;
   text?: string;
-  beforeMutation?: () => Promise<void>;
+  beforeMutation?: () => Promise<void | Date>;
 }): Promise<void> {
   const { max, authority, permit, settings } = params;
   if (!permit.result) {
@@ -65,11 +65,15 @@ export async function deliverGroupCommandNotice(params: {
           // FLAG: Transport admission may outlive either SQL lease or the saved source.
           // Recheck command and recovery ownership after its wait, before the final deadline.
           await authority.assertOwned(permit);
-          await params.beforeMutation?.();
+          const recoveryLeaseUntil = await params.beforeMutation?.();
+          const noticeDeadline = await authority.closureNoticeDeadline(permit);
           // FLAG: No awaited proof may consume the command lease or source deadline
           // between its check and the actual HTTP mutation boundary.
           const now = Date.now();
+          if (now >= noticeDeadline)
+            throw new Error('Saved group closure notice is no longer current');
           if (
+            (recoveryLeaseUntil instanceof Date && recoveryLeaseUntil.getTime() <= now) ||
             (permit.leaseExpiresAt && permit.leaseExpiresAt.getTime() <= now) ||
             (permit.executionDeadlineAt !== undefined &&
               (!permit.executionDeadlineAt || permit.executionDeadlineAt.getTime() <= now))

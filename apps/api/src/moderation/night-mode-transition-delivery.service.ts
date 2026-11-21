@@ -576,8 +576,8 @@ export class NightModeTransitionDeliveryService {
           params.onDispatchAttempt(botId, new Date());
         },
         beforeSendMutation: async () => {
-          await this.assertCurrentTransitionState(params.chatId, params.validateBeforeDispatch);
           await assertNoAlias();
+          await this.assertCurrentTransitionState(params.chatId, params.validateBeforeDispatch);
         },
       });
     }
@@ -601,8 +601,8 @@ export class NightModeTransitionDeliveryService {
         idempotencyKey: params.logicalIdempotencyKey,
         beforeImmediateSendMutation: withMaxFinalAuthorityCheckpoint(async (revalidateRoute) => {
           await revalidateRoute?.();
-          await this.assertCurrentTransitionState(params.chatId, params.validateBeforeDispatch);
           await assertNoAlias();
+          await this.assertCurrentTransitionState(params.chatId, params.validateBeforeDispatch);
         }),
       },
     );

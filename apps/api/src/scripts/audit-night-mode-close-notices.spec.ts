@@ -1,3 +1,4 @@
+import { legacyNightModeAuditArgs } from './repair-missed-night-mode-close-notices';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -166,6 +167,27 @@ const botRegistry = {
 } as unknown as Parameters<typeof runNightModeCloseNoticeFleetAudit>[1];
 
 describe('night mode close notice fleet audit', () => {
+  it('limits the former repair command to the same read-only audit', () => {
+    const parse = (argv: string[]) =>
+      readNightModeCloseNoticeAuditOptions(legacyNightModeAuditArgs(argv));
+    expect(parse([])).toEqual({ pageSize: 100, maxChats: 100, sampleLimit: 0, after: null });
+    expect(parse(['--dry-run', '--limit', '12', '--after', 'chat-cursor'])).toEqual({
+      pageSize: 100,
+      maxChats: 12,
+      sampleLimit: 0,
+      after: 'chat-cursor',
+    });
+    expect(() => parse(['--execute'])).toThrow(/Unknown option/u);
+    expect(() => parse(['--limit', '100001'])).toThrow(/between/u);
+    const legacySource = readFileSync(
+      resolve(__dirname, 'repair-missed-night-mode-close-notices.ts'),
+      'utf8',
+    );
+    expect(legacySource).not.toMatch(
+      /AppModule|processNightModeTransitionJob|ModerationExecutionService/u,
+    );
+  });
+
   it('parses bounded, read-only CLI options', () => {
     expect(
       readNightModeCloseNoticeAuditOptions([

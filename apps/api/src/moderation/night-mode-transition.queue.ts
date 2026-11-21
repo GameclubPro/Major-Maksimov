@@ -109,6 +109,7 @@ export type NightModeTransitionJob = QueueJobEnvelope<
 
 export type NightModeTransitionProcessResult = {
   shouldEnqueueNext: boolean;
+  waitForManualOpening?: true;
 };
 
 export const NIGHT_MODE_TRANSITION_PROCESS_CONTINUE: NightModeTransitionProcessResult = {

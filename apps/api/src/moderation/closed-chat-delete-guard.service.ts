@@ -3,7 +3,11 @@ import {
   finalizeDeleteAuthority,
   type DeleteAuthorityPreparation,
 } from './moderation-delete-authority-preparation';
-import { isStateVoiceReason, readStateVoiceReasonKeys } from './state-voice-delete-source';
+import {
+  isStateVoiceReason,
+  readStateVoiceReasonKeys,
+  stateVoiceReasonDeadline,
+} from './state-voice-delete-source';
 import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MaxBotLinkService } from '../max/max-bot-link.service';
@@ -154,7 +158,12 @@ export class ClosedChatDeleteGuardService {
                   ?.dueAt.getTime() ?? Infinity);
           return {
             reasonKey: reason.reasonKey,
-            deadlineAtMs: Math.min(sourceAt + 5 * 60_000, closureDeadline),
+            deadlineAtMs: Math.min(
+              isStateVoiceReason(reason)
+                ? stateVoiceReasonDeadline(reason, sourceAt)
+                : sourceAt + 5 * 60_000,
+              closureDeadline,
+            ),
           };
         })
         .filter((reason) => Date.now() < reason.deadlineAtMs);
@@ -218,7 +227,8 @@ export class ClosedChatDeleteGuardService {
     return (
       current?.status === 'closed' &&
       original?.status === 'closed' &&
-      current.sessionKey === original.sessionKey &&
+      // FLAG: Equal endpoints continuously close the chat across local midnight. No new session begins there.
+      (current.startMinutes === current.endMinutes || current.sessionKey === original.sessionKey) &&
       metadata.nightModeTimezone === current.timezone &&
       metadata.nightModeStartTime === formatMinutesAsTime(current.startMinutes) &&
       metadata.nightModeEndTime === formatMinutesAsTime(current.endMinutes)

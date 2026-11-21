@@ -66,6 +66,7 @@ import {
   parseNightModeTransitionSessionKey,
   resolveCurrentNightModeCloseOccurrence,
   resolveCurrentNightModeOpenOccurrence,
+  resolveEffectiveChatClosure,
   resolveNightModeTransitionSessionCloseAt,
   resolveNightModeTransitionSessionOpenAt,
   resolveNextNightModeTransitionOccurrences,
@@ -888,6 +889,56 @@ export class NightModeTransitionSchedulerService implements OnModuleInit, OnModu
     };
   }
 
+  private async readCloseCleanupWake(chatId: string, sessionKey: string): Promise<number | null> {
+    const settings = await this.prisma.chatSettings.findUnique({
+      where: { chatId },
+      select: {
+        nightModeEnabled: true,
+        nightModeTimezone: true,
+        nightModeStartTimeMinutes: true,
+        nightModeEndTimeMinutes: true,
+        nightModeForceCloseEnabled: true,
+        nightModeForceCloseForever: true,
+        nightModeForceCloseUntil: true,
+      },
+    });
+    if (!settings) return null;
+    const effective = resolveEffectiveChatClosure(settings);
+    if (
+      !effective.manual.active ||
+      effective.night?.status !== 'open' ||
+      effective.night.sessionKey !== sessionKey
+    )
+      return null;
+    return effective.nextTransitionAt?.getTime() ?? null;
+  }
+
+  /** FLAG: The wake time delays inspection only. The canonical session and DELETE authority stay unchanged. */
+  async parkCloseCleanup(
+    job: NightModeTransitionJob,
+    jobId: string,
+    delayJob: (at: number) => Promise<void>,
+  ): Promise<void> {
+    const recovery = parseNightModeTransitionRecoveryObligation(job.recoveryOnly);
+    if (
+      recovery?.kind !== NIGHT_MODE_TRANSITION_CLOSE_CLEANUP_RECOVERY ||
+      buildNightModeTransitionRecoveryJobId(job.chatId, recovery) !== jobId
+    )
+      throw new Error('Cannot park an unrelated night cleanup');
+    await this.runChatQueueMutationSerialized(job.chatId, async () => {
+      const wake = await this.readCloseCleanupWake(job.chatId, recovery.sessionKey);
+      const wakeAt = wake ?? Date.now();
+      const updated = await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE "night_mode_transition_scheduled_jobs"
+        SET "recovery_payload" = jsonb_set("recovery_payload", '{cleanupWakeAtMs}', to_jsonb(${BigInt(wakeAt)}::bigint))
+        WHERE "chat_id" = ${job.chatId} AND "job_id" = ${jobId}
+          AND "recovery_payload" - 'cleanupWakeAtMs' = ${JSON.stringify(recovery)}::jsonb
+      `);
+      if (updated !== 1) throw new Error('Missing exact durable night cleanup during deferral');
+      await delayJob(wakeAt);
+    });
+  }
+
   private async enqueueRecoveryObligationJob(job: NightModeTransitionJob): Promise<void> {
     if (!this.queue || !job.recoveryOnly)
       throw new Error('Night mode recovery queue is unavailable');
@@ -966,7 +1017,30 @@ export class NightModeTransitionSchedulerService implements OnModuleInit, OnModu
         review ??= this.recoveryObligationManualReview(row, existing.failedReason);
         continue;
       }
+      const metadata = row.recovery_payload as Record<string, unknown>;
+      const parked =
+        recovery.kind === NIGHT_MODE_TRANSITION_CLOSE_CLEANUP_RECOVERY &&
+        typeof metadata.cleanupWakeAtMs === 'number';
+      if (parked) {
+        const expectedWake = await this.readCloseCleanupWake(chatId, recovery.sessionKey);
+        if (
+          expectedWake !== null &&
+          expectedWake === metadata.cleanupWakeAtMs &&
+          expectedWake > Date.now()
+        )
+          continue;
+        // A settings change or the SQL wake deadline makes this exact obligation runnable again.
+        if (existing && (await existing.getState()) === 'delayed') await existing.promote();
+      }
       await this.enqueueRecoveryObligationJob(job);
+      if (parked) {
+        await this.prisma.$executeRaw(Prisma.sql`
+          UPDATE "night_mode_transition_scheduled_jobs"
+          SET "recovery_payload" = "recovery_payload" - 'cleanupWakeAtMs', "updated_at" = CURRENT_TIMESTAMP
+          WHERE "chat_id" = ${chatId} AND "job_id" = ${row.job_id}
+            AND "recovery_payload"->'cleanupWakeAtMs' = ${JSON.stringify(metadata.cleanupWakeAtMs)}::jsonb
+        `);
+      }
     }
     return review;
   }
@@ -3625,7 +3699,9 @@ export class NightModeTransitionSchedulerService implements OnModuleInit, OnModu
             "night_mode_transition_scheduled_jobs"."scheduled_for",
             "night_mode_transition_scheduled_jobs"."schedule_fingerprint",
             "night_mode_transition_scheduled_jobs"."runtime_version",
-            "night_mode_transition_scheduled_jobs"."recovery_payload"
+            CASE WHEN "night_mode_transition_scheduled_jobs"."recovery_payload"->>'kind' = 'close_notice_cleanup'
+              THEN "night_mode_transition_scheduled_jobs"."recovery_payload" - 'cleanupWakeAtMs'
+              ELSE "night_mode_transition_scheduled_jobs"."recovery_payload" END
           ) IS DISTINCT FROM ROW(
             EXCLUDED."transition",
             EXCLUDED."session_key",

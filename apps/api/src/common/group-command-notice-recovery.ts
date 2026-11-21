@@ -311,7 +311,7 @@ export async function recoverGroupCommandNotice(
   if (!completedSend && !isUnattemptedSend(ledger, journal, chatId, journal.noticeBotId))
     return false;
   const expired = !completedSend && event.executionDeadlineAt!.getTime() <= Date.now();
-  if (!completedSend && !expired && (!dependencies?.readiness || !dependencies.links)) return false;
+
   const leaseToken = randomUUID();
   const acquired = await prisma.webhookExecutionClaim.updateMany({
     where: {
@@ -381,6 +381,7 @@ export async function recoverGroupCommandNotice(
         'Command notice recovery deadline or lease elapsed',
         1_000,
       );
+    return leaseExpiresAt;
   };
   try {
     if (command.status === 'READY' && completedSend && (await legacyHolds?.isUpdateHeld(update))) {
@@ -424,9 +425,11 @@ export async function recoverGroupCommandNotice(
       if (!permit || !permit.result || resultDigest(permit.result) !== journal.commandResultDigest)
         throw new WebhookPreparationDeferredError('Saved command notice lease unavailable', 1_000);
       await assertOwned();
-      if (expired) {
-        // FLAG: Expiry can settle only this proven unattempted notice. The applied
-        // command result survives unchanged; no whole-engine success is fabricated.
+      const stale =
+        !completedSend && !expired && (await authority.closureNoticeDeadline(permit)) <= Date.now();
+      if (expired || stale) {
+        // FLAG: Settle only this exact, certified unattempted SEND. Neither a new
+        // policy nor an expired deadline cancels an accepted or uncertain effect.
         await prisma.$transaction(async (tx) => {
           const source = await tx.webhookEvent.findUnique({ where: { id: event.id } });
           const action = await tx.maxActionLedgerEntry.findUnique({
@@ -435,13 +438,15 @@ export async function recoverGroupCommandNotice(
           if (
             !source ||
             source.executionDeadlineAt?.toISOString() !== journal.deadlineAt ||
-            source.executionDeadlineAt.getTime() > Date.now() ||
+            (expired && source.executionDeadlineAt.getTime() > Date.now()) ||
             hasWebhookReplayFence(source) ||
             !isDeepStrictEqual(source.normalizedPayload, event.normalizedPayload) ||
             !isUnattemptedSend(action, journal, chatId, journal.noticeBotId)
           )
             throw new WebhookPreparationDeferredError('Command notice expiry proof changed', 1_000);
           await authority.assertOwned(permit!, tx);
+          if (stale && (await authority.closureNoticeDeadline(permit!, tx)) > Date.now())
+            throw new WebhookPreparationDeferredError('Group control notice policy changed', 1_000);
           const finishedAt = new Date();
           const terminalAction = await tx.maxActionLedgerEntry.updateMany({
             where: {
@@ -463,8 +468,10 @@ export async function recoverGroupCommandNotice(
               status: 'FAILED_TERMINAL',
               terminal: true,
               completedAt: finishedAt,
-              lastErrorCode: 'COMMAND_NOTICE_EXPIRED',
-              lastError: 'Unattempted saved command notice expired',
+              lastErrorCode: stale ? 'COMMAND_NOTICE_SUPERSEDED' : 'COMMAND_NOTICE_EXPIRED',
+              lastError: stale
+                ? 'Group control notice superseded before dispatch'
+                : 'Unattempted saved command notice expired',
             },
           });
           await authority.complete(permit!, tx);
@@ -477,7 +484,8 @@ export async function recoverGroupCommandNotice(
               leaseExpiresAt: null,
               commandResult: {
                 ...journal,
-                kind: 'COMMAND_NOTICE_EXPIRED',
+                kind: stale ? 'EXECUTION_FINISHED' : 'COMMAND_NOTICE_EXPIRED',
+                ...(stale ? { noticeOutcome: 'superseded_before_dispatch' } : {}),
                 finishedAt: finishedAt.toISOString(),
               },
             },
@@ -513,6 +521,11 @@ export async function recoverGroupCommandNotice(
         return true;
       }
       if (!completedSend) {
+        if (!dependencies?.readiness || !dependencies.links)
+          throw new WebhookPreparationDeferredError(
+            'Command notice execution route unavailable',
+            1_000,
+          );
         noticeProof = await dependencies!.readiness!.ensureReady({
           chatId,
           purpose: 'send_message',

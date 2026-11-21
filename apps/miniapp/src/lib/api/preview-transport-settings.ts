@@ -1,5 +1,8 @@
 import { SECTION_SETTING_KEYS } from '../../pages/settings-page-state';
-import { createPreviewOpenChatClosure } from './preview-chat-closure';
+import {
+  createPreviewChatClosureSummary,
+  createPreviewOpenChatClosure,
+} from './preview-chat-closure';
 import {
   duplicateDiagnosticsResponseSchema,
   stopWordsPolicySchema,
@@ -451,6 +454,11 @@ export async function handleChatRequest(
       botCount: assignedBots.length,
       hasSharedAutomation: assignedBots.length > 1,
     });
+  }
+
+  if (tail[0] === 'closure-status' && method === 'GET') {
+    assertPreviewSettingsScreenAvailable(state);
+    return createPreviewChatClosureSummary(state.chatSettings, readPreviewClock(state.clock));
   }
 
   if (tail[0] === 'settings-screen' && method === 'GET') {

@@ -5,7 +5,10 @@ import type { ApiTransport } from '../../src/lib/api/transport';
 import { ApiRequestError } from '../../src/lib/api-request-error';
 import SettingsChatClosureStatus from '../../src/pages/settings/settings-chat-closure-status';
 import { getNightTimezoneOptions } from '../../src/pages/settings/settings-timezones';
-import { useSettingsScreenQuery } from '../../src/pages/settings/use-settings-screen-query';
+import {
+  useChatClosureSummary,
+  useSettingsScreenQuery,
+} from '../../src/pages/settings/use-settings-screen-query';
 import { useSettingsDraft } from '../../src/pages/settings/use-settings-draft';
 import '../../src/styles.css';
 import '../../src/styles/settings-native-controls.css';
@@ -31,6 +34,12 @@ function Harness() {
     chatId: 'chat-a',
     expandedSections: { night: expanded, links: false, duplicates: false },
   });
+  const closure = useChatClosureSummary({
+    api,
+    chatId: 'chat-a',
+    enabled: expanded && screen.isSuccess,
+    principal: 'user-1',
+  });
   const settings = useSettingsDraft({
     api,
     chatId: 'chat-a',
@@ -49,7 +58,7 @@ function Harness() {
         {expanded ? 'Закрыть раздел' : 'Открыть раздел'}
       </button>
       <div data-testid="fetch-state" hidden>
-        {screen.fetchStatus}
+        {closure.fetchStatus}
       </div>
       {settings.draft && (
         <div style={{ display: 'grid', gap: 12, margin: '16px 0' }}>
@@ -93,8 +102,8 @@ function Harness() {
           </output>
         </div>
       )}
-      {expanded && screen.data?.closure && (
-        <SettingsChatClosureStatus status={screen.data.closure} refreshFailed={screen.isError} />
+      {expanded && closure.data && (
+        <SettingsChatClosureStatus status={closure.data} refreshFailed={closure.isError} />
       )}
     </main>
   );

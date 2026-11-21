@@ -415,6 +415,71 @@ describeNative('night mode durable handoffs with PostgreSQL and BullMQ', () => {
     ).toEqual(recovery);
   });
 
+  it.each([false, true])(
+    'wakes the same parked cleanup when an administrator opens early (queue loss=%s)',
+    async (lost) => {
+      const now = new Date();
+      const minute = now.getUTCHours() * 60 + now.getUTCMinutes();
+      const until = new Date(now.getTime() + 3 * 60 * 60_000);
+      const current = await prisma.chatSettings.update({
+        where: { chatId },
+        data: {
+          nightModeEnabled: true,
+          nightModeTimezone: 'UTC',
+          nightModeStartTimeMinutes: (minute + 6 * 60) % 1440,
+          nightModeEndTimeMinutes: (minute + 23 * 60) % 1440,
+          nightModeForceCloseEnabled: true,
+          nightModeForceCloseForever: false,
+          nightModeForceCloseUntil: until.toISOString(),
+        },
+      });
+      const open = resolveCurrentNightModeOpenOccurrence(current, now)!;
+      const cleanup = {
+        kind: NIGHT_MODE_TRANSITION_CLOSE_CLEANUP_RECOVERY,
+        version: 1 as const,
+        sessionKey: open.sessionKey,
+        timezone: current.nightModeTimezone,
+        startMinutes: current.nightModeStartTimeMinutes,
+        endMinutes: current.nightModeEndTimeMinutes,
+        openScheduledFor: open.dueAt.toISOString(),
+        scheduleFingerprint: buildNightModeTransitionScheduleFingerprint(current),
+        sideEffectFingerprint: buildNightModeTransitionSideEffectFingerprint(current),
+      };
+      const scheduler = createScheduler();
+      await scheduler.scheduleRecoveryObligation(chatId, cleanup);
+      const id = buildNightModeTransitionRecoveryJobId(chatId, cleanup);
+      worker = new Worker<NightModeTransitionJob>(chatId, undefined, {
+        connection,
+        autorun: false,
+      });
+      const token = randomUUID();
+      const job = (await worker.getNextJob(token, { block: false }))!;
+      expect(job.id).toBe(id);
+      await scheduler.parkCloseCleanup(job.data, id, (at) => job.moveToDelayed(at, token));
+      expect(await job.getState()).toBe('delayed');
+      if (lost) await job.remove();
+      const restarted = createScheduler();
+      await restarted.repairAccessSchedule(chatId);
+      if (lost) expect(await queue.getJob(id)).toBeUndefined();
+      else expect(await job.getState()).toBe('delayed');
+      const where = { chatId_jobId: { chatId, jobId: id } };
+      expect(
+        (await prisma.nightModeTransitionScheduledJob.findUniqueOrThrow({ where })).recoveryPayload,
+      ).toEqual({ ...cleanup, cleanupWakeAtMs: until.getTime() });
+      await prisma.chatSettings.update({
+        where: { chatId },
+        data: { nightModeForceCloseEnabled: false },
+      });
+      await restarted.repairAccessSchedule(chatId);
+      const ready = (await queue.getJob(id))!;
+      expect(ready.data.recoveryOnly).toEqual(cleanup);
+      expect(await ready.getState()).toBe('waiting');
+      expect(
+        (await prisma.nightModeTransitionScheduledJob.findUniqueOrThrow({ where })).recoveryPayload,
+      ).toEqual(cleanup);
+    },
+  );
+
   it('restores legacy fold recovery timestamps unchanged after queue loss and disable', async () => {
     const sessionKey = 'v1:Europe/Berlin:23:00:02:30:2026-10-24';
     const oldTime = '2026-10-25T01:30:00.000Z';
