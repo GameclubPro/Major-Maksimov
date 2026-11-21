@@ -1,4 +1,10 @@
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  type OnModuleDestroy,
+  type OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { fork, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -16,11 +22,11 @@ import {
   type CommercialOcrNativeBehaviorIdentity,
 } from './commercial-ocr-behavior-identity';
 import {
-  NativeOcrSandboxClient,
   NativeOcrSandboxRequestError,
   NativeOcrSandboxRequestTimeoutError,
   NativeOcrSandboxUnavailableError,
 } from './native-ocr-sandbox.client';
+import { NativeOcrSandboxPool } from './native-ocr-sandbox.pool';
 import {
   NATIVE_TESSERACT_PAGE_SEGMENTATION_MODES,
   type NativeTesseractFailedOpenResult,
@@ -87,6 +93,11 @@ export type NativeTesseractRuntimeStatus = Readonly<{
     available: boolean;
     observedAtMs: number | null;
     snapshot: NativeOcrSandboxRuntimeStatus | null;
+    lanes?: readonly Readonly<{
+      verified: boolean;
+      observedAtMs: number | null;
+      snapshot: NativeOcrSandboxRuntimeStatus | null;
+    }>[];
   }>;
   queueWaitMs: NativeTesseractQueueWaitSnapshot;
   counters: Readonly<{
@@ -117,8 +128,8 @@ export type NativeTesseractBehaviorIdentityStatus = Readonly<{
 }>;
 
 export type NativeTesseractQueueWaitSnapshot = Readonly<{
-  observed: number;
-  sampled: number;
+  observed: number | null;
+  sampled: number | null;
   capacity: number;
   last: number | null;
   average: number | null;
@@ -201,7 +212,7 @@ export class NativeTesseractOcrAdapter implements OnModuleInit, OnModuleDestroy 
   private readonly ompThreadLimit: number;
   private readonly nativeArtifactVerificationRequired: boolean;
   private readonly nativeBehaviorIdentity: CommercialOcrNativeBehaviorIdentity;
-  private readonly sandbox: NativeOcrSandboxClient;
+  private readonly sandbox: NativeOcrSandboxPool;
   private sandboxProbeTimer: NodeJS.Timeout | null = null;
   private nativeArtifactVerification: CommercialOcrNativeArtifactVerification | null = null;
   private nativeArtifactVerificationPromise: Promise<void> | null = null;
@@ -222,7 +233,10 @@ export class NativeTesseractOcrAdapter implements OnModuleInit, OnModuleDestroy 
   private readonly failuresByReason = new Map<NativeTesseractFailureReason, number>();
   private readonly queueWaitMs = new BoundedQueueWaitMetric(QUEUE_WAIT_SAMPLE_CAPACITY);
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() sandbox?: NativeOcrSandboxPool,
+  ) {
     const engine = resolveCommercialOcrNativeEngineConfig(configService);
     const controls = resolveCommercialOcrNativeRuntimeControls(configService);
     this.binary = engine.binary;
@@ -238,7 +252,7 @@ export class NativeTesseractOcrAdapter implements OnModuleInit, OnModuleDestroy 
       configService.get<string>('APP_SERVICE_NAME') === 'api-media-analysis';
     this.nativeBehaviorIdentity =
       resolveExpectedCommercialOcrProductionBehaviorIdentity(configService).identity;
-    this.sandbox = new NativeOcrSandboxClient(configService);
+    this.sandbox = sandbox ?? new NativeOcrSandboxPool(configService);
   }
 
   onModuleInit(): void {
@@ -1036,12 +1050,23 @@ export class NativeTesseractOcrAdapter implements OnModuleInit, OnModuleDestroy 
         this.recordResult(failed);
         return failed;
       }
-      this.recordNativeArtifactVerificationFailure(error, 'boundary.probe_failed');
+      let reason: NativeTesseractFailureReason;
+      if (this.sandbox.count > 1 && this.sandbox.isVerified()) {
+        // FLAG: Preserve independently attested peers. The failing lane was quarantined by
+        // the pool and will only serve work again after a new verified probe.
+        reason =
+          error instanceof NativeOcrSandboxUnavailableError && error.reason === 'unavailable'
+            ? 'worker_unavailable'
+            : 'artifact_unverified';
+      } else {
+        this.recordNativeArtifactVerificationFailure(error, 'boundary.probe_failed');
+        reason = this.nativeArtifactVerificationFailureReason;
+      }
       const failed = this.buildFailedOpenResult(
         startedAt,
         passLabel,
         psm,
-        this.shuttingDown ? 'shutting_down' : this.nativeArtifactVerificationFailureReason,
+        this.shuttingDown ? 'shutting_down' : reason,
       );
       this.recordResult(failed);
       return failed;
@@ -1050,20 +1075,26 @@ export class NativeTesseractOcrAdapter implements OnModuleInit, OnModuleDestroy 
 
   private getSandboxRuntimeStatus(): NativeTesseractRuntimeStatus {
     const boundary = this.sandbox.getStatus();
-    const statusAgeMs =
-      boundary.runtimeStatusObservedAtMs === null
-        ? Infinity
-        : Date.now() - boundary.runtimeStatusObservedAtMs;
-    const runtime =
-      boundary.verified && statusAgeMs >= 0 && statusAgeMs <= 2 * SANDBOX_PROBE_INTERVAL_MS
-        ? boundary.runtimeStatus
-        : null;
+    const statuses = this.sandbox.count > 1 ? this.sandbox.getStatuses() : [boundary];
+    const lanes = statuses.map((status) => {
+      const observedAtMs = status.runtimeStatusObservedAtMs;
+      const ageMs = observedAtMs === null ? Infinity : Date.now() - observedAtMs;
+      const snapshot =
+        status.verified && ageMs >= 0 && ageMs <= 2 * SANDBOX_PROBE_INTERVAL_MS
+          ? status.runtimeStatus
+          : null;
+      return { verified: status.verified, observedAtMs, snapshot };
+    });
+    const verifiedLanes = lanes.filter((lane) => lane.verified).length;
+    const runtime = lanes[0]!.snapshot;
+    const pool = this.sandbox.count > 1;
+    const allDiagnosed = lanes.every((lane) => lane.snapshot !== null);
     const artifactReady = this.nativeArtifactsReadyForRecognition();
     const ready =
       this.initialized &&
       !this.shuttingDown &&
       boundary.configured &&
-      boundary.verified &&
+      verifiedLanes > 0 &&
       artifactReady;
     const total = this.completedCount + this.failedCount;
     return {
@@ -1076,40 +1107,42 @@ export class NativeTesseractOcrAdapter implements OnModuleInit, OnModuleDestroy 
             : 'starting',
       ready,
       workers: {
-        configured: this.concurrency,
-        live: boundary.verified ? 1 : 0,
-        ready: ready ? 1 : 0,
-        busy: runtime ? (runtime.activeOperation === 'idle' ? 0 : 1) : null,
+        configured: this.sandbox.isConfigured() ? this.sandbox.count : this.concurrency,
+        live: verifiedLanes,
+        ready: ready ? verifiedLanes : 0,
+        busy: allDiagnosed
+          ? lanes.filter((lane) => lane.snapshot!.activeOperation !== 'idle').length
+          : null,
       },
-      queueDepth: runtime?.queueDepth ?? null,
+      queueDepth: allDiagnosed
+        ? lanes.reduce((sum, lane) => sum + lane.snapshot!.queueDepth, 0)
+        : null,
       sandboxRuntime: {
-        available: runtime !== null,
-        observedAtMs: boundary.runtimeStatusObservedAtMs,
-        snapshot: runtime,
+        available: pool ? allDiagnosed : runtime !== null,
+        observedAtMs: pool
+          ? allDiagnosed
+            ? Math.min(...lanes.map((lane) => lane.observedAtMs!))
+            : null
+          : boundary.runtimeStatusObservedAtMs,
+        snapshot: pool ? null : runtime,
+        ...(pool ? { lanes } : {}),
       },
-      queueWaitMs: runtime
-        ? {
-            // FLAG: Server queue waits include valid pre-start rejections as well as starts.
-            observed: Math.min(
-              Number.MAX_SAFE_INTEGER,
-              runtime.counters.started +
-                runtime.counters.rejections.capacity_exhausted +
-                runtime.counters.rejections.request_deadline_exceeded +
-                runtime.counters.rejections.shutting_down,
-            ),
-            sampled: runtime.queueWaitMs.samples,
-            capacity: QUEUE_WAIT_SAMPLE_CAPACITY,
-            last: runtime.queueWaitMs.last,
-            average: runtime.queueWaitMs.average,
-            maximum: runtime.queueWaitMs.maximum,
+      queueWaitMs: allDiagnosed
+        ? summarizeSandboxQueueWait(lanes.map(({ snapshot }) => snapshot!))
+        : {
+            observed: null,
+            sampled: null,
+            capacity: QUEUE_WAIT_SAMPLE_CAPACITY * lanes.length,
+            last: null,
+            average: null,
+            maximum: null,
             p95: null,
             p99: null,
-          }
-        : this.queueWaitMs.snapshot(),
+          },
       counters: {
         completed: this.completedCount,
         failed: this.failedCount,
-        restarts: this.restartCount + boundary.restarts,
+        restarts: this.restartCount + statuses.reduce((sum, status) => sum + status.restarts, 0),
         recycles: this.recycleCount,
         failuresByReason: Object.fromEntries(this.failuresByReason),
       },
@@ -1126,6 +1159,40 @@ export class NativeTesseractOcrAdapter implements OnModuleInit, OnModuleDestroy 
       },
     };
   }
+}
+
+function summarizeSandboxQueueWait(
+  runtimes: readonly NativeOcrSandboxRuntimeStatus[],
+): NativeTesseractQueueWaitSnapshot {
+  let observed = 0;
+  let sampled = 0;
+  let total = 0;
+  let maximum: number | null = null;
+  for (const runtime of runtimes) {
+    const { counters, queueWaitMs } = runtime;
+    // Include valid pre-start refusals as well as native starts, without counting local defers.
+    observed +=
+      counters.started +
+      counters.rejections.capacity_exhausted +
+      counters.rejections.request_deadline_exceeded +
+      counters.rejections.shutting_down;
+    sampled += queueWaitMs.samples;
+    total += (queueWaitMs.average ?? 0) * queueWaitMs.samples;
+    if (queueWaitMs.maximum !== null) {
+      maximum = Math.max(maximum ?? 0, queueWaitMs.maximum);
+    }
+  }
+  return {
+    observed: Math.min(Number.MAX_SAFE_INTEGER, observed),
+    sampled,
+    capacity: QUEUE_WAIT_SAMPLE_CAPACITY * runtimes.length,
+    // Each lane exposes only its last value, without its sample timestamp.
+    last: runtimes.length === 1 ? runtimes[0]!.queueWaitMs.last : null,
+    average: sampled > 0 ? roundDuration(total / sampled) : null,
+    maximum,
+    p95: null,
+    p99: null,
+  };
 }
 
 function isAllowedPsm(value: unknown): value is NativeTesseractPageSegmentationMode {

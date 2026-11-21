@@ -484,8 +484,26 @@ function verifyRuntime(root, manifest) {
   ])
     .trim()
     .split('\n');
+  const activeApi = manifest.components['api-shared'];
+  const image = JSON.parse(execute('docker', ['image', 'inspect', activeApi.imageRef]))[0];
+  const supportsPool = image?.Config?.Labels?.['com.maxim.ocr-native-sandbox-pool-capable'];
+  if (image?.Id !== activeApi.imageId || (supportsPool !== undefined && supportsPool !== 'true'))
+    refuse('RUNTIME_IDENTITY_UNPROVED');
+  const poolMembers = ['ocr-native-sandbox-2', 'ocr-native-sandbox-3'];
+  if (
+    supportsPool !== 'true' &&
+    inspected.some((container) =>
+      poolMembers.includes(container.Config?.Labels?.['com.docker.compose.service']),
+    )
+  )
+    refuse('RUNTIME_IDENTITY_UNPROVED');
   const services = {
-    'api-shared': [...topology, 'ocr-native-sandbox', 'photo-native-sandbox'],
+    'api-shared': [
+      ...topology,
+      'ocr-native-sandbox',
+      ...(supportsPool === 'true' ? poolMembers : []),
+      'photo-native-sandbox',
+    ],
     'miniapp-major-static': ['miniapp-major-static'],
     'admin-static': ['admin-static'],
     eraser: ['eraser'],

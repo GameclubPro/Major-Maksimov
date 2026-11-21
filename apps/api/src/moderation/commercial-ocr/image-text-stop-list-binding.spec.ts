@@ -25,6 +25,7 @@ describe('image text stop-list delete binding', () => {
 
   it('round-trips a privacy-safe binding and matches the exact source', () => {
     const binding = buildImageTextStopListBinding({
+      policyVersion: 'image-text-stop-list-v2',
       ocrVersion: 'tesseract-rus-eng-v2',
       nativeBehaviorFingerprintSha256: 'b'.repeat(64),
       policyFingerprint,
@@ -37,6 +38,14 @@ describe('image text stop-list delete binding', () => {
     });
 
     expect(parseImageTextStopListBinding({ imageTextStopListBinding: binding })).toEqual(binding);
+    expect(binding.policyVersion).toBe('image-text-stop-list-v2');
+    const legacy = { ...binding, policyVersion: 'image-text-stop-list-v1' };
+    expect(parseImageTextStopListBinding({ imageTextStopListBinding: legacy })).toEqual(legacy);
+    expect(
+      parseImageTextStopListBinding({
+        imageTextStopListBinding: { ...binding, policyVersion: 'image-text-stop-list-v99' },
+      }),
+    ).toBeNull();
     expect(imageTextStopListSourceMatchesBinding(binding, source)).toBe(true);
     expect(imageTextStopListSourceMatchesBinding(binding, { ...source, caption: 'changed' })).toBe(
       false,
@@ -58,6 +67,7 @@ describe('image text stop-list delete binding', () => {
       ...source,
     });
 
+    expect(binding.policyVersion).toBe('image-text-stop-list-v1');
     expect(
       parseImageTextStopListBinding({
         imageTextStopListBinding: { ...binding, sandboxBoundary: 'local_worker' },

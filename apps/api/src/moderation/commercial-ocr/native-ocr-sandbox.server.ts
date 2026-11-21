@@ -21,6 +21,8 @@ import {
 import { restrictNativeOcrSandboxEnvironment } from './native-ocr-sandbox.environment';
 import {
   CommercialOcrImageRejectedError,
+  readCommercialOcrCrop,
+  type CommercialOcrPreprocessOptions,
   resolveCommercialOcrPreprocessLimits,
 } from './commercial-ocr-preprocess-config';
 import type { NativeOcrImagePreprocessor } from './native-ocr-image-preprocessor';
@@ -432,6 +434,7 @@ export async function startNativeOcrSandboxServer(
         try {
           const result = await preprocessor.prepare(frame.payload, input.pass, {
             deadlineAtMs: Date.now() + request.timeoutMs,
+            ...(input.crop ? { crop: input.crop } : {}),
           });
           recordResult(true);
           respond(
@@ -831,7 +834,13 @@ function respond(
 function validatePreprocessRequest(
   frame: NativeOcrSandboxFrame,
   maximumImageBytes: number,
-): { pass: 'primary' | 'confirmation'; timeoutMs: number } {
+): {
+  pass: 'primary' | 'confirmation';
+  timeoutMs: number;
+  crop?: CommercialOcrPreprocessOptions['crop'];
+} {
+  const hasCrop = Object.hasOwn(frame.metadata, 'crop');
+  const crop = hasCrop ? readCommercialOcrCrop(frame.metadata.crop) : null;
   if (
     frame.kind !== NATIVE_OCR_SANDBOX_FRAME_KINDS.preprocessRequest ||
     frame.payload.byteLength < 1 ||
@@ -839,13 +848,18 @@ function validatePreprocessRequest(
       Math.min(maximumImageBytes, NATIVE_OCR_SANDBOX_MAX_SOURCE_IMAGE_BYTES) ||
     (frame.metadata.pass !== 'primary' && frame.metadata.pass !== 'confirmation') ||
     !isIntegerBetween(frame.metadata.timeoutMs, 1, 5_000) ||
-    !hasExactKeys(frame.metadata, ['pass', 'timeoutMs', 'deadlineNs'])
+    (hasCrop && (!crop || frame.metadata.pass !== 'primary')) ||
+    !hasExactKeys(
+      frame.metadata,
+      hasCrop ? ['pass', 'timeoutMs', 'deadlineNs', 'crop'] : ['pass', 'timeoutMs', 'deadlineNs'],
+    )
   ) {
     throw new Error('Native OCR sandbox preprocess request is invalid');
   }
   return {
     pass: frame.metadata.pass,
     timeoutMs: frame.metadata.timeoutMs as number,
+    ...(crop ? { crop } : {}),
   };
 }
 

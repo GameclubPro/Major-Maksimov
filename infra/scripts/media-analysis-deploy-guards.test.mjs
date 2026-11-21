@@ -779,6 +779,7 @@ test('cold native admission accepts only fresh queue-only failure and keeps rele
 
 test('sandbox OCR smoke uses only the attested UDS probe and never spawns Tesseract directly', () => {
   const result = runTopologyProbe(`
+maxim_topology_ocr_services_for_compose() { printf '%s\\n' ocr-native-sandbox; }
 maxim_topology_require_ocr_native_sandbox_config() { :; }
 maxim_topology_wait_for_ocr_native_sandbox() { :; }
 maxim_topology_verify_ocr_native_sandbox_runtime() { :; }

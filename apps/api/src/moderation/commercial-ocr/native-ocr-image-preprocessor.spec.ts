@@ -79,6 +79,24 @@ describe('NativeOcrImagePreprocessor output bounds', () => {
     }
   });
 
+  it('extracts a bounded crop from the oriented and resized primary raster', async () => {
+    const input = await sharp({
+      create: { width: 80, height: 50, channels: 3, background: '#64839a' },
+    })
+      .jpeg()
+      .withMetadata({ orientation: 6 })
+      .toBuffer();
+    const preprocessor = new NativeOcrImagePreprocessor(COMMERCIAL_OCR_DEFAULT_PREPROCESS_LIMITS);
+    const primary = await preprocessor.prepare(input, 'primary');
+    const crop = { left: 3, top: 7, width: 40, height: 20 };
+    const region = await preprocessor.prepare(input, 'primary', { crop });
+    const reference = await sharp(primary.bytes).extract(crop).raw().toBuffer();
+    await expect(sharp(region.bytes).raw().toBuffer()).resolves.toEqual(reference);
+    await expect(
+      preprocessor.prepare(input, 'primary', { crop: { ...crop, left: primary.width - 1 } }),
+    ).rejects.toMatchObject({ reason: 'invalid_image' });
+  });
+
   it.each([8, 16] as const)(
     'preserves alpha and both pass pixels for a %s-bit PNG outside the corrected area boundary',
     async (bitDepth) => {

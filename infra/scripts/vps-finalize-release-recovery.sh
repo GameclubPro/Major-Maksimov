@@ -399,7 +399,7 @@ verify_no_unreviewed_running_api_containers() {
   local running_ids=()
 
   if [[ "$TARGET_HAS_OCR_NATIVE_SANDBOX" -eq 1 ]]; then
-    expected_auxiliary="$MAXIM_OCR_NATIVE_SANDBOX_SERVICE"
+    expected_auxiliary="$(maxim_topology_ocr_compose_csv COMPOSE_FILES)" || return 1
   fi
   if [[ "$MAXIM_TARGET_HAS_PHOTO_NATIVE_SANDBOX" -eq 1 ]]; then
     if [[ "$expected_auxiliary" == none ]]; then
@@ -448,10 +448,13 @@ verify_runtime_snapshot() {
       "${COMPONENT_IMAGE_ID[api-shared]}" || return 1
   done
   if [[ "$TARGET_HAS_OCR_NATIVE_SANDBOX" -eq 1 ]]; then
-    inspect_service_runtime \
-      "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" \
-      "${COMPONENT_IMAGE_REF[api-shared]}" \
-      "${COMPONENT_IMAGE_ID[api-shared]}" || return 1
+    local ocr_members
+    ocr_members="$(maxim_topology_ocr_services_for_compose COMPOSE_FILES)" || return 1
+    [[ -n "$ocr_members" ]] || return 1
+    while IFS= read -r service; do
+      inspect_service_runtime "$service" "${COMPONENT_IMAGE_REF[api-shared]}" \
+        "${COMPONENT_IMAGE_ID[api-shared]}" || return 1
+    done <<<"$ocr_members"
     maxim_topology_verify_ocr_native_sandbox_runtime \
       COMPOSE_FILES "${COMPONENT_IMAGE_ID[api-shared]}" with-media || return 1
   else

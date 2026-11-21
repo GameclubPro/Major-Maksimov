@@ -154,16 +154,19 @@ function findLiteral(
   view: TextView,
   value: string,
   source: string,
+  acceptExactMatch?: (span: { start: number; end: number }) => boolean,
 ): { start: number; end: number } | null {
   let index = view.text.indexOf(value);
   while (index !== -1) {
     const end = index + value.length;
+    const span = { start: view.starts[index], end: view.ends[end - 1] };
     if (
       !LEFT_WORD_BOUNDARY.test(view.text.slice(Math.max(0, index - 3), index)) &&
       !RIGHT_WORD_BOUNDARY.test(view.text.slice(end, end + 3)) &&
-      hasSourceBoundary(source, view.starts[index], view.ends[end - 1])
+      hasSourceBoundary(source, span.start, span.end) &&
+      (!acceptExactMatch || acceptExactMatch(span))
     ) {
-      return { start: view.starts[index], end: view.ends[end - 1] };
+      return span;
     }
     index = view.text.indexOf(value, index + 1);
   }
@@ -199,6 +202,7 @@ export class StopWordsMatcher {
     textSegments?: readonly string[];
     navigationTargets?: readonly { kind: string; target: string; enforceable: boolean }[];
     isLinkAllowlisted?: (link: string) => boolean;
+    acceptExactMatch?: (span: { start: number; end: number }) => boolean;
     limit?: number;
   }): Match[] {
     if (!params.policy.enabled) return [];
@@ -220,7 +224,7 @@ export class StopWordsMatcher {
         if (seen.has(rule.id)) continue;
         if (rule.matchMode === 'EXACT') {
           if (!entry.exactTokens.every((token) => exactTokens.has(token))) continue;
-          const match = findLiteral(exactView, normalizedValue, text);
+          const match = findLiteral(exactView, normalizedValue, text, params.acceptExactMatch);
           if (match) {
             matches.push({
               ruleId: rule.id,

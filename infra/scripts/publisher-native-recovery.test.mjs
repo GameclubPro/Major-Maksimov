@@ -57,6 +57,8 @@ async function dockerFixture(directory) {
     calls.push(args);
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     const finish = (stdout = '', status = 0, stderr = '') => ({ stdout, status, stderr });
+    if (args[0] === 'compose' && args.includes('config') && args.includes('--services'))
+      return finish(state.containers.map(serviceOf).join('\n'));
     if (args[0] === 'compose' && args.includes('config'))
       return finish(JSON.stringify({ name: 'infra' }));
     if (args[0] === 'compose' && args.includes('ps')) {
@@ -67,7 +69,7 @@ async function dockerFixture(directory) {
     if (args[0] === 'image' && args.includes('inspect')) return finish('true');
     if (args[0] === 'ps') {
       let rows = state.containers.filter(
-        (container) => args.includes('-a') || container.State.Running,
+        (container) => args.includes('-a') || args.includes('--all') || container.State.Running,
       );
       for (let i = 0; i < args.length; i++) {
         if (args[i] !== '--filter') continue;

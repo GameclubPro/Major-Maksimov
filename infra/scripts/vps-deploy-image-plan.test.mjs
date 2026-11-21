@@ -375,6 +375,14 @@ docker() {
     compose)
       if [[ "$PRESENT" == 1 ]]; then printf '%s' running-sandbox; fi
       ;;
+    ps)
+      case "$*" in
+        'ps -a -q --no-trunc --filter label=com.docker.compose.project=infra --filter label=com.docker.compose.service=ocr-native-sandbox-2')
+          if [[ "\${EXTRA_PRESENT:-0}" == 1 ]]; then printf '%064d' 2; fi ;;
+        'ps -a -q --no-trunc --filter label=com.docker.compose.project=infra --filter label=com.docker.compose.service=ocr-native-sandbox-3') ;;
+        *) return 99 ;;
+      esac
+      ;;
     *) return 99 ;;
   esac
 }
@@ -386,6 +394,9 @@ LABEL=absent
 PRESENT=1
 if maxim_topology_verify_ocr_native_sandbox_for_image COMPOSE_FILES "$2"; then exit 12; fi
 PRESENT=0
+EXTRA_PRESENT=1
+if maxim_topology_verify_ocr_native_sandbox_for_image COMPOSE_FILES "$2"; then exit 13; fi
+EXTRA_PRESENT=0
 maxim_topology_verify_ocr_native_sandbox_for_image COMPOSE_FILES "$2"
 maxim_topology_require_ocr_native_sandbox_image_capability "$2" 0
 `,

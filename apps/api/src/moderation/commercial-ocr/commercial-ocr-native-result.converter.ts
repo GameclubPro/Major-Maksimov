@@ -29,6 +29,7 @@ export type CommercialOcrNativeConversionResult =
 /** Converts untrusted native output into the exact bounded representation used by runtime policy. */
 export function convertCommercialOcrNativePayload(
   payload: CommercialOcrNativePayload,
+  rasterSize?: CommercialOcrCacheValue['rasterSize'],
 ): CommercialOcrNativeConversionResult {
   if (payload.truncated === true) {
     return { kind: 'rejected', reason: 'truncated' };
@@ -64,7 +65,7 @@ export function convertCommercialOcrNativePayload(
     }
     const words: CommercialOcrCachedWord[] = [];
     for (const candidate of payload.words) {
-      const word = convertNativeWord(candidate);
+      const word = convertNativeWord(candidate, rasterSize);
       if (!word) {
         return { kind: 'rejected', reason: 'invalid' };
       }
@@ -76,6 +77,7 @@ export function convertCommercialOcrNativePayload(
       text: payload.text,
       confidencePermille: toPermille(payload.aggregateConfidence),
       words,
+      ...(rasterSize ? { rasterSize } : {}),
     };
   }
 
@@ -99,6 +101,7 @@ export function commercialOcrCacheValueToDecisionPass(
     text: value.text,
     confidencePermille: value.confidencePermille,
     words: value.words,
+    ...(value.rasterSize ? { rasterSize: value.rasterSize } : {}),
     criticalEvidence:
       value.status === 'recognized'
         ? deriveCommercialOcrCriticalEvidence({ text: value.text, words: value.words })
@@ -106,7 +109,10 @@ export function commercialOcrCacheValueToDecisionPass(
   };
 }
 
-function convertNativeWord(value: unknown): CommercialOcrCachedWord | null {
+function convertNativeWord(
+  value: unknown,
+  rasterSize: CommercialOcrCacheValue['rasterSize'],
+): CommercialOcrCachedWord | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -124,6 +130,11 @@ function convertNativeWord(value: unknown): CommercialOcrCachedWord | null {
     start: candidate.start,
     end: candidate.end,
     confidencePermille: toPermille(candidate.confidence),
+    ...(rasterSize && candidate.boundingBox && typeof candidate.boundingBox === 'object'
+      ? {
+          boundingBox: candidate.boundingBox as NonNullable<CommercialOcrCachedWord['boundingBox']>,
+        }
+      : {}),
   };
 }
 

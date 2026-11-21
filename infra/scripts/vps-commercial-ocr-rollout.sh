@@ -473,7 +473,7 @@ read_running_api_inventory() {
   expected_image_id="${MANIFEST_IMAGE_ID:-none}"
   expected_auxiliary=none
   if [[ "$EXPECTED_HAS_OCR_NATIVE_SANDBOX" -eq 1 ]]; then
-    expected_auxiliary="$MAXIM_OCR_NATIVE_SANDBOX_SERVICE"
+    expected_auxiliary="$(maxim_topology_ocr_compose_csv COMPOSE_FILES)" || return 1
   fi
   if [[ "$MAXIM_TARGET_HAS_PHOTO_NATIVE_SANDBOX" -eq 1 ]]; then
     if [[ "$expected_auxiliary" == none ]]; then
@@ -1123,21 +1123,26 @@ api_runtime_signature() {
     printf '%s|%s|%s\n' "$service" "${container_ids[0]}" "$restart_count"
   done
   if [[ "$EXPECTED_HAS_OCR_NATIVE_SANDBOX" -eq 1 ]]; then
-    container_ids_raw="$(
-      run_host_command_before_deadline "$deadline" "$READINESS_COMMAND_MAX_TIMEOUT_SEC" \
-        docker compose "${COMPOSE_FILES[@]}" ps --status running -q \
-          "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" 2>/dev/null
-    )" || return 1
-    container_ids=()
-    [[ -z "$container_ids_raw" ]] || mapfile -t container_ids <<<"$container_ids_raw"
-    [[ "${#container_ids[@]}" -eq 1 ]] || return 1
-    restart_count="$(
-      run_host_command_before_deadline "$deadline" "$READINESS_COMMAND_MAX_TIMEOUT_SEC" \
-        docker inspect --format '{{.RestartCount}}' "${container_ids[0]}" 2>/dev/null
-    )" || return 1
-    [[ "$restart_count" =~ ^[0-9]+$ ]] || return 1
-    printf '%s|%s|%s\n' "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" \
-      "${container_ids[0]}" "$restart_count"
+    local ocr_members
+    ocr_members="$(maxim_topology_ocr_services_for_compose COMPOSE_FILES)" || return 1
+    [[ -n "$ocr_members" ]] || return 1
+    while IFS= read -r service; do
+      container_ids_raw="$(
+        run_host_command_before_deadline "$deadline" "$READINESS_COMMAND_MAX_TIMEOUT_SEC" \
+          docker compose "${COMPOSE_FILES[@]}" ps --status running -q \
+            "$service" 2>/dev/null
+      )" || return 1
+      container_ids=()
+      [[ -z "$container_ids_raw" ]] || mapfile -t container_ids <<<"$container_ids_raw"
+      [[ "${#container_ids[@]}" -eq 1 ]] || return 1
+      restart_count="$(
+        run_host_command_before_deadline "$deadline" "$READINESS_COMMAND_MAX_TIMEOUT_SEC" \
+          docker inspect --format '{{.RestartCount}}' "${container_ids[0]}" 2>/dev/null
+      )" || return 1
+      [[ "$restart_count" =~ ^[0-9]+$ ]] || return 1
+      printf '%s|%s|%s\n' "$service" \
+        "${container_ids[0]}" "$restart_count"
+    done <<<"$ocr_members"
   fi
 }
 

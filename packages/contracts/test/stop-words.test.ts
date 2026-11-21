@@ -9,6 +9,21 @@ import {
   stopWordsStatusSchema,
 } from '../src/stop-words.js';
 
+it('selects the next exact occurrence if a caller rejects the first span', () => {
+  const policy = stopWordsPolicySchema.parse({
+    enabled: true,
+    rules: [{ id: 'word', kind: 'WORD', value: 'берёза' }],
+  });
+  const matcher = new StopWordsMatcher();
+  const text = 'Берёза и БЕРЕЗА';
+
+  expect(matcher.detect({ text, policy })).toMatchObject([{ start: 0, fragment: 'Берёза' }]);
+  expect(
+    matcher.detect({ text, policy, acceptExactMatch: ({ start }) => start > 0 }),
+  ).toMatchObject([{ start: 9, fragment: 'БЕРЕЗА' }]);
+  expect(matcher.detect({ text, policy, acceptExactMatch: () => false })).toEqual([]);
+});
+
 describe('stop-word policy contract', () => {
   it('defaults to disabled exact rules without participant sanctions', () => {
     const policy = stopWordsPolicySchema.parse({

@@ -73,6 +73,101 @@ describe('evaluateImageTextStopListDecision', () => {
     expect(result).toMatchObject({ kind: 'match', value: 'casino', ruleId: 'latin' });
   });
 
+  it('scores both exact matches by the matched spans despite low confidence on the rest of the photo', () => {
+    const current = settings({
+      stopWordsPolicy: stopWordsPolicySchema.parse({
+        enabled: true,
+        rules: [{ id: 'exact', kind: 'PHRASE', value: 'доход без вложений' }],
+      }),
+    });
+    const primary = pass('шум доход без вложений конец', 600);
+    const confirmation = pass('Доход без вложений посторонний', 700);
+    const withConfidence = (base: CommercialOcrPass, values: readonly number[]) => ({
+      ...base,
+      words: base.words!.map((word, index) => ({
+        ...word,
+        confidencePermille: values[index]!,
+      })),
+    });
+    const primaryPass = withConfidence(primary, [310, 951, 932, 949, 500]);
+    const confirmationPass = withConfidence(confirmation, [982, 956, 967, 500]);
+
+    expect(shouldConfirmImageTextStopListPass(primaryPass, current)).toBe(true);
+    expect(
+      evaluateImageTextStopListDecision({
+        settings: current,
+        images: [{ imageIndex: 0, primary: primaryPass, confirmation: confirmationPass }],
+      }),
+    ).toMatchObject({
+      kind: 'match',
+      ruleId: 'exact',
+      policyVersion: 'image-text-stop-list-v2',
+      primaryConfidencePermille: 932,
+      confirmationConfidencePermille: 956,
+    });
+  });
+
+  it('uses a later trusted occurrence when the first exact word is uncertain', () => {
+    const current = settings({
+      stopWordsPolicy: stopWordsPolicySchema.parse({
+        enabled: true,
+        rules: [{ id: 'exact', kind: 'WORD', value: 'казино' }],
+      }),
+    });
+    const primary = pass('казино затем казино', 700);
+    const words = primary.words!.map((word, index) => ({
+      ...word,
+      confidencePermille: index === 2 ? 970 : 550,
+    }));
+    expect(
+      evaluateImageTextStopListDecision({
+        settings: current,
+        images: [{ imageIndex: 0, primary: { ...primary, words }, confirmation: pass('казино') }],
+      }),
+    ).toMatchObject({ kind: 'match', ruleId: 'exact', primaryConfidencePermille: 970 });
+  });
+
+  it.each([
+    ['казино-', 'кафе'],
+    ['https://shop.example/', 'казино'],
+  ])('does not create an exact match by dropping a low-confidence part of %s%s', (left, right) => {
+    const current = settings({
+      stopWordsPolicy: stopWordsPolicySchema.parse({
+        enabled: true,
+        rules: [{ id: 'exact', kind: 'WORD', value: 'казино' }],
+      }),
+    });
+    const primary = pass(left + right, 975);
+    const words = [left, right].map((text, index) => ({
+      text,
+      start: index === 0 ? 0 : left.length,
+      end: index === 0 ? left.length : left.length + right.length,
+      confidencePermille: text.includes('казино') ? 990 : 550,
+    }));
+    expect(shouldConfirmImageTextStopListPass({ ...primary, words }, current)).toBe(false);
+  });
+
+  it('keeps whole-pass confidence required for masked, legacy, and domain matches', () => {
+    const masked = settings({
+      stopWordsPolicy: stopWordsPolicySchema.parse({
+        enabled: true,
+        rules: [{ id: 'masked', kind: 'WORD', value: 'казино', matchMode: 'MASKED' }],
+      }),
+    });
+    for (const [text, current] of [
+      ['к.а.з.и.н.о', masked],
+      ['казино', settings({ messageLimitsBlockedWords: ['казино'] })],
+      ['casino.example', settings({ messageLimitsBlockedDomains: ['casino.example'] })],
+    ] as const) {
+      expect(
+        shouldConfirmImageTextStopListPass(
+          { ...pass(text, 970), confidencePermille: 870 },
+          current,
+        ),
+      ).toBe(false);
+    }
+  });
+
   it('requires every phrase token to be independently trusted', () => {
     const policy = stopWordsPolicySchema.parse({
       enabled: true,

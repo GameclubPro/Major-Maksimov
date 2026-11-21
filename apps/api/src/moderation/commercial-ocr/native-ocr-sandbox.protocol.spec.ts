@@ -4,6 +4,7 @@ import {
   NATIVE_OCR_SANDBOX_FRAME_KINDS,
   NATIVE_OCR_SANDBOX_HEADER_BYTES,
   resolveNativeOcrSandboxSocketPath,
+  NATIVE_OCR_SANDBOX_EXTRA_SOCKET_PATHS,
 } from './native-ocr-sandbox.protocol';
 
 describe('native OCR sandbox protocol', () => {
@@ -65,6 +66,14 @@ describe('native OCR sandbox protocol', () => {
         requireRuntimeDirectory: true,
       }),
     ).toBe('/run/maxim-ocr/native-ocr.sock');
+    for (const path of NATIVE_OCR_SANDBOX_EXTRA_SOCKET_PATHS) {
+      expect(resolveNativeOcrSandboxSocketPath(path, { requireRuntimeDirectory: true })).toBe(path);
+    }
+    expect(() =>
+      resolveNativeOcrSandboxSocketPath('/run/maxim-ocr-4/native-ocr.sock', {
+        requireRuntimeDirectory: true,
+      }),
+    ).toThrow('must be inside');
     expect(() =>
       resolveNativeOcrSandboxSocketPath('/tmp/native-ocr.sock', {
         requireRuntimeDirectory: true,

@@ -1,3 +1,4 @@
+import type { NativeOcrSandboxPool } from './native-ocr-sandbox.pool';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter } from 'node:events';
 import { fork, type ChildProcess } from 'node:child_process';
@@ -12,7 +13,6 @@ import {
 } from './commercial-ocr-behavior-identity';
 import { NativeTesseractOcrAdapter } from './native-tesseract-ocr.adapter';
 import {
-  NativeOcrSandboxClient,
   NativeOcrSandboxRequestError,
   NativeOcrSandboxRequestTimeoutError,
   NativeOcrSandboxUnavailableError,
@@ -325,7 +325,12 @@ describe('NativeTesseractOcrAdapter', () => {
     jest.useFakeTimers();
     const { service, sandbox, identity } = createIsolatedSandboxService();
     const probe = jest.spyOn(sandbox, 'probe').mockResolvedValue(verifiedNativeIdentity(identity));
-    const boundaryVerified = jest.spyOn(sandbox, 'isVerified').mockReturnValue(true);
+    let boundaryVerified = true;
+    const status = sandbox.getStatus();
+    jest.spyOn(sandbox, 'getStatus').mockImplementation(() => ({
+      ...status,
+      verified: boundaryVerified,
+    }));
     const recognize = jest
       .spyOn(sandbox, 'recognize')
       .mockResolvedValueOnce({ ok: false, reason: 'timeout' })
@@ -341,7 +346,7 @@ describe('NativeTesseractOcrAdapter', () => {
       });
 
       probe.mockRejectedValue(new NativeOcrSandboxUnavailableError('unavailable'));
-      boundaryVerified.mockReturnValue(false);
+      boundaryVerified = false;
       await jest.advanceTimersByTimeAsync(5_000);
       await expect(service.recognize(Buffer.from('during restart'))).resolves.toMatchObject({
         ok: false,
@@ -360,7 +365,7 @@ describe('NativeTesseractOcrAdapter', () => {
       });
 
       probe.mockResolvedValue(verifiedNativeIdentity(identity));
-      boundaryVerified.mockReturnValue(true);
+      boundaryVerified = true;
       await jest.advanceTimersByTimeAsync(5_000);
       await expect(service.recognize(Buffer.from('recovered'))).resolves.toMatchObject({
         ok: true,
@@ -660,7 +665,8 @@ describe('NativeTesseractOcrAdapter', () => {
         sandboxRuntime: { available: false, snapshot: null },
       });
       expect(service.getRuntimeStatus().queueWaitMs).toMatchObject({
-        observed: 0,
+        observed: null,
+        sampled: null,
         last: null,
         average: null,
       });
@@ -1324,7 +1330,7 @@ function createIsolatedSandboxService(overrides: Record<string, unknown> = {}) {
   const identity = completeNativeIdentity(config);
   const service = new TestNativeTesseractOcrAdapter(config);
   Object.defineProperty(service, 'nativeBehaviorIdentity', { configurable: true, value: identity });
-  const sandbox = Reflect.get(service, 'sandbox') as NativeOcrSandboxClient;
+  const sandbox = Reflect.get(service, 'sandbox') as NativeOcrSandboxPool;
   return { service, sandbox, identity };
 }
 

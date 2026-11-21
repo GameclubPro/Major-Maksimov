@@ -66,10 +66,7 @@ import {
 import { resolveCommercialOcrRuntimePolicy } from './commercial-ocr.runtime';
 import { fingerprintCommercialOcrSettingsProfile } from './commercial-ocr-settings-profile';
 import { extractCommercialOcrSourceCreatedAt } from './commercial-ocr-source-time';
-import {
-  IMAGE_TEXT_STOP_LIST_POLICY_VERSION,
-  type ImageTextStopListDecision,
-} from './image-text-stop-list-decision';
+import type { ImageTextStopListDecision } from './image-text-stop-list-decision';
 import {
   buildImageTextStopListBinding,
   fingerprintImageTextStopListPolicy,
@@ -87,7 +84,7 @@ import {
   commercialOcrCompleted,
   type CommercialOcrTerminalResult,
 } from './commercial-ocr-terminal';
-import { resolveCommercialOcrSourceRetry } from './commercial-ocr-source-retry';
+import { classifyCommercialOcrSourceFailure } from './commercial-ocr-source-retry';
 import { buildCommercialQualitySample } from '../commercial/commercial-quality-sampling';
 import { NativeTesseractOcrAdapter } from './native-tesseract-ocr.adapter';
 
@@ -939,7 +936,7 @@ export class CommercialOcrModerationService {
       readString(updateRecord.executionOwnerBotId) ??
       readString(update.botId) ??
       this.maxBotLinkService.getDefaultBotId();
-    const exact = await this.loadExactSource(job, originBotId, deadlineAtMs);
+    const exact = await this.loadExactSource(job, originBotId, deadlineAtMs, 'initial');
     if (exact.kind === 'terminal') {
       return { kind: 'terminal', ...exact.terminal };
     }
@@ -1044,6 +1041,7 @@ export class CommercialOcrModerationService {
     }
 
     const binding = buildImageTextStopListBinding({
+      ...(params.decision.policyVersion ? { policyVersion: params.decision.policyVersion } : {}),
       ocrVersion: params.job.ocrVersion,
       nativeBehaviorFingerprintSha256: nativeBehavior.fingerprintSha256,
       policyFingerprint: initialPolicyFingerprint,
@@ -1126,6 +1124,7 @@ export class CommercialOcrModerationService {
       params.job,
       params.source.originBotId,
       params.deadlineAtMs,
+      'revalidation',
     );
     const exact = exactResult.kind === 'ready' ? exactResult.value : null;
     if (
@@ -1186,7 +1185,7 @@ export class CommercialOcrModerationService {
       source: 'image_text_ocr',
       enforcementScope: 'delete_only',
       matchedRuleCode: params.decision.ruleCode,
-      policyVersion: IMAGE_TEXT_STOP_LIST_POLICY_VERSION,
+      policyVersion: params.binding.policyVersion,
       imageIndex: params.decision.imageIndex,
       ocrVersion: params.job.ocrVersion,
       primaryConfidencePermille: params.decision.primaryConfidencePermille,
@@ -1349,6 +1348,7 @@ export class CommercialOcrModerationService {
     job: CommercialOcrJob,
     botId: string,
     deadlineAtMs: number,
+    phase: 'initial' | 'revalidation',
   ): Promise<
     | { kind: 'ready'; value: CommercialOcrExactMessageSource }
     | { kind: 'terminal'; terminal: CommercialOcrTerminalResult }
@@ -1385,12 +1385,12 @@ export class CommercialOcrModerationService {
           };
     } catch (error: unknown) {
       this.metrics.recordCounter('source.exact.unavailable');
-      const retry = resolveCommercialOcrSourceRetry(error);
+      const { kind, retry } = classifyCommercialOcrSourceFailure(error);
+      this.metrics.recordCounter(`source.exact.failure.${phase}.${kind}`);
       if (retry) {
         this.metrics.recordCounter('source.exact.retry');
         throw new CommercialOcrSourceUnavailableError(retry);
       }
-      this.logger.warn('Commercial OCR exact source lookup failed; enforcement remains fail-open');
       // FLAG: A failed source read leaves analysis incomplete; an access/missing HTTP status
       // cannot establish source absence. Preserve terminal fail-open and the original retry policy.
       return {
@@ -1457,6 +1457,7 @@ export class CommercialOcrModerationService {
       params.job,
       params.initialSource.originBotId,
       params.deadlineAtMs,
+      'revalidation',
     );
     const exact = exactResult.kind === 'ready' ? exactResult.value : null;
     const exactSource = exact?.source ?? null;

@@ -26,6 +26,12 @@ import {
   type CommercialOcrTerminalResult,
 } from './commercial-ocr-terminal';
 
+import {
+  NATIVE_OCR_SANDBOX_POOL_SOCKET_PATHS_ENV,
+  NATIVE_OCR_SANDBOX_SOCKET_PATH_ENV,
+  resolveNativeOcrSandboxExtraPaths,
+} from './native-ocr-sandbox.protocol';
+
 const MAX_DEFER_MS = 10 * 60_000;
 const DEFAULT_MAX_JOB_AGE_MS = 5 * 60_000;
 const DEFER_REASONS = new Set([
@@ -54,7 +60,12 @@ type CommercialOcrRetryResult = {
 };
 
 @Processor(COMMERCIAL_OCR_QUEUE, {
-  concurrency: 1,
+  concurrency:
+    1 +
+    resolveNativeOcrSandboxExtraPaths(
+      process.env[NATIVE_OCR_SANDBOX_SOCKET_PATH_ENV],
+      process.env[NATIVE_OCR_SANDBOX_POOL_SOCKET_PATHS_ENV],
+    ).length,
 })
 export class CommercialOcrProcessor extends WorkerHost {
   private readonly logger = new Logger(CommercialOcrProcessor.name);

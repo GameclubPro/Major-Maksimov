@@ -4,8 +4,10 @@ import {
   COMMERCIAL_OCR_SHARP_CONCURRENCY,
   COMMERCIAL_OCR_SHARP_PROCESSING_TIMEOUT_SECONDS,
   CommercialOcrImageRejectedError,
+  readCommercialOcrCrop,
   type CommercialOcrPassName,
   type CommercialOcrPreparedImage,
+  type CommercialOcrPreprocessOptions,
   type CommercialOcrPreprocessLimits,
 } from './commercial-ocr-preprocess-config';
 
@@ -21,8 +23,12 @@ export class NativeOcrImagePreprocessor {
   async prepare(
     input: Buffer,
     pass: CommercialOcrPassName,
-    options: { deadlineAtMs?: number } = {},
+    options: CommercialOcrPreprocessOptions = {},
   ): Promise<CommercialOcrPreparedImage> {
+    const crop = options.crop === undefined ? undefined : readCommercialOcrCrop(options.crop);
+    if (crop === null || (crop !== undefined && pass !== 'primary')) {
+      throw new CommercialOcrImageRejectedError('invalid_image');
+    }
     let metadata: Metadata;
     try {
       metadata = await sharp(input, { limitInputPixels: this.limits.maxInputPixels })
@@ -116,6 +122,31 @@ export class NativeOcrImagePreprocessor {
     ) {
       prepared.data.fill(0);
       throw new CommercialOcrImageRejectedError('too_many_pixels');
+    }
+    if (crop) {
+      // FLAG: Coordinates refer to the same oriented, resized grayscale raster as the
+      // primary OCR pass. Decode and extract only inside the isolated native sandbox.
+      try {
+        if (
+          crop.left + crop.width > prepared.info.width ||
+          crop.top + crop.height > prepared.info.height
+        ) {
+          throw new CommercialOcrImageRejectedError('invalid_image');
+        }
+        const bytes = await sharp(prepared.data, { limitInputPixels: this.limits.maxOutputPixels })
+          .timeout({ seconds: resolveSharpTimeoutSeconds(options.deadlineAtMs) })
+          .extract(crop)
+          .png({ compressionLevel: 1, adaptiveFiltering: false })
+          .toBuffer();
+        return { bytes, width: crop.width, height: crop.height };
+      } catch (error: unknown) {
+        if (isProcessingTimeoutError(error)) {
+          throw new CommercialOcrImageRejectedError('processing_timeout');
+        }
+        throw new CommercialOcrImageRejectedError('invalid_image');
+      } finally {
+        prepared.data.fill(0);
+      }
     }
     return {
       bytes: prepared.data,

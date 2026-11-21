@@ -21,7 +21,10 @@ fi
 require_corrective_controller_source
 # shellcheck source=infra/scripts/lib/deploy-lock.sh
 source "$ROOT_DIR/infra/scripts/lib/deploy-lock.sh"
+# shellcheck source=infra/scripts/lib/deploy-topology.sh
+source "$ROOT_DIR/infra/scripts/lib/deploy-topology.sh"
 acquire_deploy_lock
+maxim_topology_require_single_ocr_for_legacy_recovery
 # FLAG: Recheck controller identity under the inherited shared lock. The envelope
 # separately binds the stopped runtime and cannot authorize a new recovery scope.
 require_corrective_controller_source

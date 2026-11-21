@@ -90,6 +90,34 @@ describe('production Compose commercial OCR isolation', () => {
       );
     });
 
+    it('isolates every production pool member with a separate IPC volume', () => {
+      const poolPaths: string[] = [];
+      for (const lane of [2, 3]) {
+        const service = `ocr-native-sandbox-${lane}`;
+        const directory = `/run/maxim-ocr-${lane}`;
+        const volume = `ocr_native_ipc_${lane}`;
+        const path = `${directory}/native-ocr.sock`;
+        if (name === 'scale') {
+          expect(compose).not.toContain(`  ${service}:`);
+          continue;
+        }
+        const sandbox = readServiceBlock(compose, service);
+        expect(sandbox).toBe(
+          nativeSandbox
+            .replaceAll('/run/maxim-ocr', directory)
+            .replaceAll('ocr_native_ipc', volume),
+        );
+        expect(mediaAnalysis).toContain(`- ${volume}:${directory}:ro`);
+        expect(mediaAnalysis).toContain(`${service}:\n        condition: service_healthy`);
+        poolPaths.push(path);
+      }
+      if (name === 'main') {
+        expect(mediaAnalysis).toContain(
+          `COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS: ${poolPaths.join(',')}`,
+        );
+      }
+    });
+
     it('keeps the exact lightweight probe CLI and measured healthcheck budget', () => {
       expect(nativeSandbox).toContain(
         '- apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js\n        - --probe',

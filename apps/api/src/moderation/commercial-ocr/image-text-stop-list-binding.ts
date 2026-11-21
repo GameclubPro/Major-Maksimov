@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 
 import type { ChatSettings } from '../../prisma/prisma-client';
-import { IMAGE_TEXT_STOP_LIST_POLICY_VERSION } from './image-text-stop-list-decision';
+import {
+  IMAGE_TEXT_STOP_LIST_LEGACY_POLICY_VERSION,
+  IMAGE_TEXT_STOP_LIST_POLICY_VERSION,
+} from './image-text-stop-list-decision';
 import { validateCommercialOcrVersion } from './commercial-ocr.queue';
 
 export const IMAGE_TEXT_STOP_LIST_BINDING_VERSION = 1 as const;
@@ -13,7 +16,9 @@ export const IMAGE_TEXT_STOP_LIST_PARTICIPANT_IMMUNITY_SCOPE = 'image_text_stop_
 
 export type ImageTextStopListBinding = Readonly<{
   version: typeof IMAGE_TEXT_STOP_LIST_BINDING_VERSION;
-  policyVersion: typeof IMAGE_TEXT_STOP_LIST_POLICY_VERSION;
+  policyVersion:
+    | typeof IMAGE_TEXT_STOP_LIST_LEGACY_POLICY_VERSION
+    | typeof IMAGE_TEXT_STOP_LIST_POLICY_VERSION;
   ocrVersion: string;
   sandboxBoundary: typeof IMAGE_TEXT_STOP_LIST_SANDBOX_BOUNDARY;
   nativeBehaviorFingerprintSha256: string;
@@ -35,6 +40,7 @@ export type ImageTextStopListBinding = Readonly<{
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
 export function buildImageTextStopListBinding(params: {
+  policyVersion?: ImageTextStopListBinding['policyVersion'];
   ocrVersion: string;
   nativeBehaviorFingerprintSha256: string;
   policyFingerprint: string;
@@ -87,7 +93,7 @@ export function buildImageTextStopListBinding(params: {
 
   return Object.freeze({
     version: IMAGE_TEXT_STOP_LIST_BINDING_VERSION,
-    policyVersion: IMAGE_TEXT_STOP_LIST_POLICY_VERSION,
+    policyVersion: params.policyVersion ?? IMAGE_TEXT_STOP_LIST_LEGACY_POLICY_VERSION,
     ocrVersion,
     sandboxBoundary: IMAGE_TEXT_STOP_LIST_SANDBOX_BOUNDARY,
     nativeBehaviorFingerprintSha256: params.nativeBehaviorFingerprintSha256,
@@ -113,7 +119,8 @@ export function parseImageTextStopListBinding(metadata: unknown): ImageTextStopL
   if (
     !value ||
     value.version !== IMAGE_TEXT_STOP_LIST_BINDING_VERSION ||
-    value.policyVersion !== IMAGE_TEXT_STOP_LIST_POLICY_VERSION ||
+    (value.policyVersion !== IMAGE_TEXT_STOP_LIST_POLICY_VERSION &&
+      value.policyVersion !== IMAGE_TEXT_STOP_LIST_LEGACY_POLICY_VERSION) ||
     value.sandboxBoundary !== IMAGE_TEXT_STOP_LIST_SANDBOX_BOUNDARY ||
     !SHA256_PATTERN.test(readString(value.nativeBehaviorFingerprintSha256)) ||
     !SHA256_PATTERN.test(readString(value.policyFingerprint)) ||
@@ -145,7 +152,7 @@ export function parseImageTextStopListBinding(metadata: unknown): ImageTextStopL
   }
   return Object.freeze({
     version: IMAGE_TEXT_STOP_LIST_BINDING_VERSION,
-    policyVersion: IMAGE_TEXT_STOP_LIST_POLICY_VERSION,
+    policyVersion: value.policyVersion,
     ocrVersion,
     sandboxBoundary: IMAGE_TEXT_STOP_LIST_SANDBOX_BOUNDARY,
     nativeBehaviorFingerprintSha256: readString(value.nativeBehaviorFingerprintSha256),
@@ -176,7 +183,8 @@ export function fingerprintImageTextStopListPolicy(params: {
   domainAllowlist: readonly string[];
 }): string {
   return digestJson({
-    version: IMAGE_TEXT_STOP_LIST_POLICY_VERSION,
+    // The fingerprint identifies settings, independently of how the OCR readings were scored.
+    version: IMAGE_TEXT_STOP_LIST_LEGACY_POLICY_VERSION,
     enabled: params.settings.messageLimitsImageTextScanEnabled,
     blockedWords: params.settings.messageLimitsBlockedWords,
     blockedDomains: params.settings.messageLimitsBlockedDomains,

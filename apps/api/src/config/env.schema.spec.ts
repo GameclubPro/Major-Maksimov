@@ -1062,6 +1062,28 @@ describe('validateEnv boolean parsing', () => {
     ).toBe(65_000);
   });
 
+  it('accepts all three OCR sockets only on the media role with its canonical primary', () => {
+    const pool = '/run/maxim-ocr-2/native-ocr.sock,/run/maxim-ocr-3/native-ocr.sock';
+    const env = {
+      APP_ROLE: 'moderation',
+      APP_SERVICE_NAME: 'api-media-analysis',
+      COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: '/run/maxim-ocr/native-ocr.sock',
+      COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS: pool,
+    } as const;
+    expect(validateEnv(createValidEnv(env)).COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS).toBe(
+      pool,
+    );
+    for (const patch of [
+      { APP_SERVICE_NAME: 'api-moderation' },
+      { COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: '/run/maxim-ocr/other.sock' },
+      { COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS: pool.split(',')[0] },
+    ]) {
+      expect(() => validateEnv(createValidEnv({ ...env, ...patch }))).toThrow(
+        /COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS/u,
+      );
+    }
+  });
+
   it('defaults the action ledger watchdog to shadow rollout', () => {
     const defaults = validateEnv(createValidEnv());
     expect(defaults.MAX_ACTION_LEDGER_WATCHDOG_MODE).toBe('shadow');

@@ -9,6 +9,7 @@ import {
   isCommercialOcrNativeBehaviorManifestComplete,
   resolveCommercialOcrBehaviorDescriptor,
   resolveCommercialOcrBehaviorIdentity,
+  resolveCommercialOcrProductionBehaviorDescriptor,
   type CommercialOcrBehaviorIdentity,
   type CommercialOcrNativeRuntimeControls,
 } from './commercial-ocr-behavior-identity';
@@ -78,6 +79,21 @@ redis.call('EXPIRE', bucketKey, bucketTtlSec)
 return 1
 `;
 
+const SOURCE_READ_FAILURE_KINDS = [
+  'access_denied',
+  'access_or_missing',
+  'remote_rate_limit',
+  'circuit_open',
+  'local_rate_limit',
+  'timeout',
+  'remote_server',
+  'remote_client',
+  'response_missing_id',
+  'unknown',
+] as const;
+
+export type CommercialOcrSourceFailureKind = (typeof SOURCE_READ_FAILURE_KINDS)[number];
+
 export const COMMERCIAL_OCR_METRIC_COUNTERS = [
   'enqueue.queued',
   'enqueue.skipped',
@@ -92,6 +108,10 @@ export const COMMERCIAL_OCR_METRIC_COUNTERS = [
   'admission.rejected.actionable_reserve',
   'admission.rejected.chat',
   'admission.rejected.age',
+  'admission.image_units.admitted',
+  'admission.image_units.rejected_global',
+  'admission.image_units.rejected_chat',
+  'admission.image_units.rejected_actionable_reserve',
   'admission.unavailable',
   'admission.activation.activated',
   'admission.activation.already_actionable',
@@ -138,6 +158,10 @@ export const COMMERCIAL_OCR_METRIC_COUNTERS = [
   'source.identity_mismatch',
   'source.creation_time_mismatch',
   'source.exact.unavailable',
+  ...SOURCE_READ_FAILURE_KINDS.flatMap((kind) => [
+    `source.exact.failure.initial.${kind}` as const,
+    `source.exact.failure.revalidation.${kind}` as const,
+  ]),
   'source.exact.absent',
   'source.exact.invalid',
   'source.exact.author_ineligible',
@@ -410,9 +434,16 @@ export class CommercialOcrMetricsService implements OnModuleDestroy {
     this.nativeCpuSamplingAvailable = !configService
       ?.get<string>('COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH')
       ?.trim();
-    this.behaviorIdentity = resolveCommercialOcrBehaviorIdentity(
-      resolveCommercialOcrBehaviorDescriptor(configService),
-    );
+    const productionProducer =
+      configService?.get('NODE_ENV') === 'production' &&
+      configService?.get('APP_ROLE') === 'moderation' &&
+      configService?.get('APP_SERVICE_NAME') !== 'api-media-analysis';
+    // Producers do not execute native operations. Use the deployed sandbox profile for their
+    // counters so the worker can report admission and completion in the same scope.
+    const descriptor = productionProducer
+      ? resolveCommercialOcrProductionBehaviorDescriptor(configService)
+      : resolveCommercialOcrBehaviorDescriptor(configService);
+    this.behaviorIdentity = resolveCommercialOcrBehaviorIdentity(descriptor);
     this.behaviorFingerprint = this.behaviorIdentity.fingerprint;
     this.behaviorScope = this.behaviorIdentity.scope;
     this.releaseKey = `${METRICS_NAMESPACE}:release:${this.behaviorScope}`;

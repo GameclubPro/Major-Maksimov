@@ -71,7 +71,9 @@ function fixture(definition, mode = 'normal') {
   const bin = join(root, 'bin');
   mkdirSync(bin);
   const sha = 'a'.repeat(40);
-  const realGit = spawnSync('which', ['git'], { encoding: 'utf8' }).stdout.trim();
+  const realGit = spawnSync('which', ['git'], {
+    encoding: 'utf8',
+  }).stdout.trim();
   writeFileSync(
     join(bin, 'git'),
     `#!/usr/bin/env bash
@@ -87,6 +89,22 @@ esac
   );
   const wrapper = join(scripts, definition.wrapper);
   writeFileSync(wrapper, readFileSync(new URL(`./${definition.wrapper}`, import.meta.url)));
+  for (const name of ['deploy-topology.sh', 'photo-native-lifecycle.sh'])
+    writeFileSync(
+      join(scripts, 'lib', name),
+      readFileSync(new URL(`./lib/${name}`, import.meta.url)),
+    );
+  writeFileSync(
+    join(bin, 'docker'),
+    `#!/usr/bin/env bash
+case "$*" in
+  'ps --all --quiet --no-trunc --filter label=com.docker.compose.project=infra --filter label=com.docker.compose.service=ocr-native-sandbox-2'|\\
+  'ps --all --quiet --no-trunc --filter label=com.docker.compose.project=infra --filter label=com.docker.compose.service=ocr-native-sandbox-3') ;;
+  *) exit 98 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
   const lock = deployLockFixture(root, join(scripts, 'lib/deploy-lock.sh'));
   // FLAG: Replace only the controller workload; both inherited flock descriptors remain real.
   writeFileSync(
@@ -377,7 +395,10 @@ for (const definition of wrappers) {
         running.child.stdin.end(request);
         await marker(h.root, 'received.json');
         process.kill(running.child.pid, signal);
-        assert.deepEqual(await marker(h.root, 'cleaning.json'), { pid: running.nodePid, signal });
+        assert.deepEqual(await marker(h.root, 'cleaning.json'), {
+          pid: running.nodePid,
+          signal,
+        });
         assert.equal(alive(running.nodePid), true);
         assert.equal(alive(observer.pid), true);
         assert.equal(h.kernelFree(h.lock.file), false);

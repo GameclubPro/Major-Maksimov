@@ -121,7 +121,7 @@ export class CommercialOcrEnqueueService {
           (imageTextScanRequested && imageTextRuntimePolicy.enforce)),
       limits,
     });
-    this.recordReservation(reservation);
+    this.recordReservation(reservation, imageCount);
 
     if (reservation.kind === 'unavailable') {
       // The reserve EVAL may have committed after its local timeout. Issuing suppression through
@@ -305,8 +305,16 @@ export class CommercialOcrEnqueueService {
     };
   }
 
-  private recordReservation(result: CommercialOcrAdmissionResult): void {
+  private recordReservation(result: CommercialOcrAdmissionResult, imageCount: number): void {
     this.metrics?.recordCounter(resolveReservationMetric(result));
+    if (
+      result.kind === 'admitted' ||
+      result.kind === 'rejected_global' ||
+      result.kind === 'rejected_chat' ||
+      result.kind === 'rejected_actionable_reserve'
+    ) {
+      this.metrics?.recordCounter(`admission.image_units.${result.kind}`, imageCount);
+    }
   }
 
   private recordSuppression(result: CommercialOcrAdmissionSuppressionResult): void {

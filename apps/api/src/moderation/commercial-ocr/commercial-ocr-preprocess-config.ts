@@ -1,3 +1,5 @@
+import type { CommercialOcrBoundingBox } from './native-tesseract-ocr.types';
+
 const DEFAULT_MAX_INPUT_PIXELS = 40_000_000;
 const DEFAULT_MAX_OUTPUT_PIXELS = 3_000_000;
 const DEFAULT_MAX_SIDE = 2_000;
@@ -34,6 +36,32 @@ export type CommercialOcrPreparedImage = {
   width: number;
   height: number;
 };
+
+export type CommercialOcrPreprocessOptions = {
+  deadlineAtMs?: number;
+  crop?: CommercialOcrBoundingBox;
+};
+
+export function readCommercialOcrCrop(value: unknown): CommercialOcrBoundingBox | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const { left, top, width, height } = value as Partial<CommercialOcrBoundingBox>;
+  if (
+    Object.keys(value).length !== 4 ||
+    !Number.isSafeInteger(left) ||
+    left! < 0 ||
+    !Number.isSafeInteger(top) ||
+    top! < 0 ||
+    !Number.isSafeInteger(width) ||
+    width! < 1 ||
+    !Number.isSafeInteger(height) ||
+    height! < 1 ||
+    left! + width! > 4_000 ||
+    top! + height! > 4_000 ||
+    width! * height! > 512_000
+  )
+    return null;
+  return { left: left!, top: top!, width: width!, height: height! };
+}
 
 export class CommercialOcrImageRejectedError extends Error {
   constructor(

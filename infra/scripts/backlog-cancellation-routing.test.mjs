@@ -231,7 +231,10 @@ remote_exec() {
 test('connector sends frozen bytes and runtime identity when the input changes during either CI wait', () => {
   const controllerSha = 'e'.repeat(40);
   for (const [entrypoint, value] of entrypoints) {
-    const result = runConnector(value, entrypoint, { controllerSha, mutate: true });
+    const result = runConnector(value, entrypoint, {
+      controllerSha,
+      mutate: true,
+    });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.request, 'changed-during-ci\n');
     assert.equal(result.stdout, bytes(value));
@@ -264,7 +267,10 @@ test('either failed exact CI check blocks SSH and never falls back to the other 
   const controllerSha = 'e'.repeat(40);
   for (const [entrypoint, value] of entrypoints) {
     for (const ciFailSha of [controllerSha, value.sourceSha]) {
-      const result = runConnector(value, entrypoint, { controllerSha, ciFailSha });
+      const result = runConnector(value, entrypoint, {
+        controllerSha,
+        ciFailSha,
+      });
       assert.equal(result.status, 1, result.stderr);
       assert.deepEqual(
         result.events,
@@ -305,6 +311,26 @@ function runHostShell(settings = {}) {
   const forwarded = join(directory, 'forwarded');
   const input = bytes(fixture.validNomination);
   writeFileSync(join(scripts, 'vps-backlog-cancellation.sh'), shellSource);
+  for (const name of ['deploy-topology.sh', 'photo-native-lifecycle.sh'])
+    writeFileSync(
+      join(scripts, 'lib', name),
+      readFileSync(new URL(`./lib/${name}`, import.meta.url)),
+    );
+  writeFileSync(
+    join(binary, 'docker'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+[[ -f "$TEST_ACQUIRED" && $# == 8 ]] || exit 90
+case "$*" in
+  'ps --all --quiet --no-trunc --filter label=com.docker.compose.project=infra --filter label=com.docker.compose.service=ocr-native-sandbox-2')
+    [[ "$TEST_DOCKER_UNAVAILABLE" == 0 ]] || exit 1
+    if [[ "$TEST_POOL" == 1 ]]; then printf '%064d\\n' 2; fi ;;
+  'ps --all --quiet --no-trunc --filter label=com.docker.compose.project=infra --filter label=com.docker.compose.service=ocr-native-sandbox-3') ;;
+  *) exit 91 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
   writeFileSync(
     join(scripts, 'lib', 'deploy-lock.sh'),
     `acquire_deploy_lock() {
@@ -350,6 +376,8 @@ cat > "$TEST_FORWARDED"
       TEST_DRIFT: settings.drift ?? '',
       TEST_CHANGED_SHA: 'f'.repeat(40),
       TEST_DIRTY: settings.dirty ? '1' : '0',
+      TEST_POOL: settings.pool ? '1' : '0',
+      TEST_DOCKER_UNAVAILABLE: settings.dockerUnavailable ? '1' : '0',
       MAXIM_EXPECTED_DEPLOY_SHA: 'e'.repeat(40),
     };
     delete env.MAXIM_EXPECTED_BACKLOG_RUNTIME_SHA;
@@ -389,9 +417,28 @@ test('host shell preserves separate identities and old omitted-runtime entry whi
 
 test('host shell refuses source or cleanliness drift after acquiring the deploy lock before launching Node', () => {
   for (const drift of ['sha', 'dirty', 'status-failure']) {
-    const result = runHostShell({ drift, runtimeSha: fixture.validApply.sourceSha });
+    const result = runHostShell({
+      drift,
+      runtimeSha: fixture.validApply.sourceSha,
+    });
     assert.equal(result.status, 2, result.stderr);
     assert.deepEqual(result.events, ['lock']);
     assert.equal(result.stdout, '');
   }
+});
+
+test('host shell refuses a multiworker OCR runtime before forwarding the request', () => {
+  const result = runHostShell({ pool: true });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /only accepts a single OCR worker/u);
+  assert.deepEqual(result.events, ['lock']);
+  assert.equal(result.forwarded, '');
+  assert.equal(result.stdout, '');
+});
+
+test('host shell fails closed when the OCR container inventory is unavailable', () => {
+  const result = runHostShell({ dockerUnavailable: true });
+  assert.equal(result.status, 1, result.stderr);
+  assert.deepEqual(result.events, ['lock']);
+  assert.equal(result.forwarded, '');
 });
