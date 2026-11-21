@@ -9,7 +9,10 @@ if [[ $# != 0 || ! "${MAXIM_EXPECTED_DEPLOY_SHA:-}" =~ ^[0-9a-f]{40}$ || \
 fi
 # shellcheck source=infra/scripts/lib/deploy-lock.sh
 source "$ROOT_DIR/infra/scripts/lib/deploy-lock.sh"
+# shellcheck source=infra/scripts/lib/deploy-topology.sh
+source "$ROOT_DIR/infra/scripts/lib/deploy-topology.sh"
 acquire_deploy_lock
+maxim_topology_require_single_ocr_for_legacy_recovery
 # FLAG: The original admission owner and inherited locks remain through stop,
 # seal, readback, restart and observed controller completion.
 supervise_deploy_lock_command node "$ROOT_DIR/infra/scripts/source-abandonment-host.mjs" --supervised-preflight

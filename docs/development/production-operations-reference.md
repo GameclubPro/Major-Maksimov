@@ -22,13 +22,14 @@ Detailed constraints selected by the routing table in [infrastructure agent note
   - `api-action`
   - `api-publisher`
   - `api-message-retention`
-- `ocr-native-sandbox` is an auxiliary of the shared API image, not a separate API role. It has
-  no network, API identity, runtime env file, or secrets and is reachable only from
-  `api-media-analysis` through the project-scoped `ocr_native_ipc` Unix-socket volume.
+- Production has three OCR auxiliaries of the shared API image. Each has one native worker,
+  1 CPU, 1 GiB, no network or secrets, and a separate Unix-socket volume. The single
+  `api-media-analysis` role mounts all three volumes read-only. The isolated scale topology retains
+  a single OCR auxiliary.
 - Both Compose topologies explicitly enable `BACKGROUND_GOVERNOR_SYSTEM_PRESSURE_ENABLED`
   for `api-media-analysis`. Verify its effective container value after OCR admission changes;
   queue-only slow progress must still stop on host pressure. Keep its existing governor
-  intervals, thresholds and single native consumer when enabling this guard.
+  intervals and thresholds and the single media-analysis owner of the slow allowance.
 - `photo-native-sandbox` is a second shared-image auxiliary with its own 1 CPU/1 GiB/64 PID
   budget. It has no network, API identity, runtime env file, or secrets; only
   `api-moderation-background` mounts its `photo_native_ipc` socket volume, read-only. Deploy and
@@ -163,6 +164,12 @@ Detailed constraints selected by the routing table in [infrastructure agent note
 - `rollback-release` reuses locally retained immutable images, checks recorded image IDs, force-recreates only selected component services, runs strict smokes, and records a new rollback manifest. API selection additionally requires Postgres/Redis readiness and Prisma compatibility; static-only rollback is image-only and does not require Git or database access. It does not switch Git refs, build images, or run migrations; an incomplete attempt leaves its typed transition journal in place instead of publishing false current inventory.
 - `rollback-runtime` is the API-only fallback when a suitable immutable release is unavailable. It requires existing Postgres/Redis readiness, preserves the current Compose file before switching to the exact ref, checks Prisma compatibility, rebuilds the shared image, runs strict smokes, and records a partial API release manifest. It never starts/recreates stateful services and cannot restore static components; an incomplete attempt leaves the transition journal rather than a false `current.json`.
 - API rollback topology follows `infra/docker-compose.yml` from the target API source SHA. Targets that predate `api-media-analysis` omit it from recreate/image verification and stop/remove the current role container. Targets that predate `ocr-native-sandbox` remove the auxiliary and use only the legacy smoke branch. Every target that includes the role must run with reviewed `COMMERCIAL_OCR_ROLLOUT_MODE=off`, `shadow` or strict `baseline` and pass exact `rus`/`eng` language smokes; baseline additionally requires all 14 roles to agree on mode and empty canary IDs and the v5 worker/dispatch capability; sandbox-capable targets must also pass isolation, UDS raster recognition, and internal OCR readiness before a release manifest is recorded.
+- For an older compatible API image, `rollback-release` selects the single-worker Compose overlay
+  and removes the two verified extra containers after stopping media analysis. It retains the
+  IPC volumes. Ref rollback refuses a pool topology mismatch before changing the source.
+  Legacy stopped-fleet emergency commands require the compatible single-worker rollback before a
+  new preview or stop. Their existing generation and journal schemas still describe the earlier
+  fleet. Use the same journal and recovery controller for an already interrupted operation.
 - API deploy and both rollback paths derive `COMMERCIAL_OCR_VERSION` from the target source's literal `COMMERCIAL_OCR_DEFAULT_VERSION`, export it over `.env`, and fail closed unless all 14 effective and running API roles match it. During a version transition, stop old `api-media-analysis` before the sandbox, recreate and attest the target sandbox before media analysis, and only then start producer roles; immutable rollback therefore restores the recorded image's source version and native boundary instead of the current checkout default.
 - MAX API diagnostic minute writers require the compatible reader source floor on both API rollback paths: `MAX_API_METRICS_MINUTE_READER_VERSION = 1` plus actual `readMaxApiMetricCounts` wiring. Use the current reviewed `main` wrapper for every subsequent API rollback, including after ref rollback: it requires the newer `maxim_topology_require_multibot_authority` entrypoint marker before taking the offline path and otherwise restores retained reviewed tooling under the existing shared lock and exact-main checks. Minute-reader tooling alone does not protect semantic/command journals. Static-only rollback keeps its earlier offline marker and does not inspect that source. A writer downgrade to `MAX_API_METRICS_STORAGE_LAYOUT=legacy` retains the reader floor because six-hour minute counters can survive it; service counters keep their last-write-based 120-second legacy TTL. See `docs/operations/runbooks/memory-optimization-rollout.md`.
 - Both API rollback paths have an irreversible source floor at image-text stop-list binding v1 and its `api-action` pre-dispatch guard. Pending OCR delete intents can outlive an environment downgrade, so never permit rollback to a target without that exact guard, even when the current image-text rollout ceiling is `shadow`.

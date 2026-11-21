@@ -5,6 +5,27 @@ export const NATIVE_OCR_SANDBOX_SOCKET_PATH_ENV =
   'COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH' as const;
 export const NATIVE_OCR_SANDBOX_DEFAULT_SOCKET_PATH = '/run/maxim-ocr/native-ocr.sock';
 export const NATIVE_OCR_SANDBOX_SOCKET_DIRECTORY = '/run/maxim-ocr';
+export const NATIVE_OCR_SANDBOX_POOL_SOCKET_PATHS_ENV =
+  'COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS' as const;
+export const NATIVE_OCR_SANDBOX_EXTRA_SOCKET_PATHS = [
+  '/run/maxim-ocr-2/native-ocr.sock',
+  '/run/maxim-ocr-3/native-ocr.sock',
+] as const;
+export const NATIVE_OCR_SANDBOX_POOL_SOCKET_PATHS = NATIVE_OCR_SANDBOX_EXTRA_SOCKET_PATHS.join(',');
+
+export function resolveNativeOcrSandboxExtraPaths(
+  primary: unknown,
+  pool: unknown,
+): readonly string[] {
+  if (pool === undefined || pool === '') return [];
+  if (
+    primary !== NATIVE_OCR_SANDBOX_DEFAULT_SOCKET_PATH ||
+    pool !== NATIVE_OCR_SANDBOX_POOL_SOCKET_PATHS
+  ) {
+    throw new Error(`${NATIVE_OCR_SANDBOX_POOL_SOCKET_PATHS_ENV} does not identify the OCR pool`);
+  }
+  return NATIVE_OCR_SANDBOX_EXTRA_SOCKET_PATHS;
+}
 
 export const NATIVE_OCR_SANDBOX_HEADER_BYTES = 16;
 // FLAG: Native execution keeps its own limit. Reserve teardown (up to 500ms) and
@@ -164,6 +185,7 @@ export function resolveNativeOcrSandboxSocketPath(
   }
   if (
     options.requireRuntimeDirectory &&
+    !(NATIVE_OCR_SANDBOX_EXTRA_SOCKET_PATHS as readonly string[]).includes(normalized) &&
     !new RegExp(`^${NATIVE_OCR_SANDBOX_SOCKET_DIRECTORY}/[A-Za-z0-9._-]+\\.sock$`, 'u').test(
       normalized,
     )

@@ -97,7 +97,21 @@ describe('native OCR sandbox server containment', () => {
         ok: true,
         payload: { text: 'TEST', aggregateConfidence: 95 },
       });
-      expect(preprocess).toHaveBeenCalledTimes(1);
+      const crop = { left: 1, top: 2, width: 10, height: 5 };
+      await expect(
+        client.preprocess(Buffer.from('source'), 'primary', 2_000, { crop }),
+      ).resolves.toMatchObject({ width: 10, height: 5 });
+      expect(preprocess).toHaveBeenLastCalledWith(
+        expect.any(Buffer),
+        'primary',
+        expect.objectContaining({ crop }),
+      );
+      await expect(
+        client.preprocess(Buffer.from('source'), 'primary', 2_000, {
+          crop: { ...crop, height: 1_000, width: 1_000 },
+        }),
+      ).rejects.toMatchObject({ reason: 'invalid_input' });
+      expect(preprocess).toHaveBeenCalledTimes(2);
       expect(recognize).toHaveBeenCalledTimes(1);
       expect(client.isVerified()).toBe(true);
     } finally {

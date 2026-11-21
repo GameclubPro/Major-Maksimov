@@ -39,6 +39,7 @@ import {
   resolveCommercialOcrPreprocessLimits,
   type CommercialOcrPassName,
   type CommercialOcrPreprocessLimits,
+  type CommercialOcrPreprocessOptions,
 } from './commercial-ocr-preprocessor';
 import {
   validateCommercialOcrImageCount,
@@ -47,6 +48,7 @@ import {
 import { NativeTesseractOcrAdapter } from './native-tesseract-ocr.adapter';
 import {
   evaluateImageTextStopListDecision,
+  resolveImageTextStopListConfirmationCrop,
   shouldConfirmImageTextStopListPass,
   type ImageTextStopListDecision,
   type ImageTextStopListPasses,
@@ -59,6 +61,7 @@ import type {
 const DEFAULT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
 const GOVERNOR_DEFER_MS = 30_000;
 const NATIVE_BACKPRESSURE_DEFER_MS = 5_000;
+const OPTIONAL_CONFIRMATION_HEADROOM_MS = 16_000;
 const RETRYABLE_DOWNLOAD_ERROR_CODES = new Set([
   'EAI_AGAIN',
   'ECONNABORTED',
@@ -182,6 +185,8 @@ export class CommercialOcrAnalysisService {
     const commercialScanEnabled =
       params.commercialScanEnabled ?? params.settings.commercialAdsFilterEnabled;
     const imageTextPasses = new Map<number, ImageTextStopListPasses>();
+    let recoveredImageTextMatch: ImageTextStopListDecision | undefined;
+    let alternativeConfirmationUsed = false;
 
     type RuntimeImageContext = {
       cpuSample: CommercialOcrImageCpuSample;
@@ -216,13 +221,14 @@ export class CommercialOcrAnalysisService {
               confirmation: CommercialOcrPass;
             }) =>
               !commercialScanEnabled &&
-              evaluateImageTextStopListDecision({
-                settings: params.settings,
-                images: [{ imageIndex, primary, confirmation }],
-                ...(params.isLinkAllowlisted
-                  ? { isLinkAllowlisted: params.isLinkAllowlisted }
-                  : {}),
-              }).kind === 'match',
+              (recoveredImageTextMatch?.kind === 'match' ||
+                evaluateImageTextStopListDecision({
+                  settings: params.settings,
+                  images: [{ imageIndex, primary, confirmation }],
+                  ...(params.isLinkAllowlisted
+                    ? { isLinkAllowlisted: params.isLinkAllowlisted }
+                    : {}),
+                }).kind === 'match'),
           }
         : {}),
       preflight: () => {
@@ -285,7 +291,7 @@ export class CommercialOcrAnalysisService {
           }
           context.contentSha256 = createHash('sha256').update(context.rawBytes).digest('hex');
         }
-        const resolved = await this.resolvePass({
+        const passParams: Parameters<CommercialOcrAnalysisService['resolvePass']>[0] = {
           rawBytes: context.rawBytes,
           contentSha256: context.contentSha256,
           ocrVersion,
@@ -295,7 +301,8 @@ export class CommercialOcrAnalysisService {
           deadlineAtMs: params.deadlineAtMs,
           imageIndex,
           cpuSample: context.cpuSample,
-        });
+        };
+        const resolved = await this.resolvePass(passParams);
         if (pass === 'confirmation' && resolved.kind === 'ready') {
           this.metrics.recordCounter('confirmation.completed');
         }
@@ -311,6 +318,42 @@ export class CommercialOcrAnalysisService {
           });
         } else if (current) {
           imageTextPasses.set(imageIndex, { ...current, confirmation: resolved.pass });
+          // FLAG: Spend at most one extra reading per album, only after an exact
+          // stop-list candidate has failed full-page confirmation. Bind a crop to
+          // its original rule and preserve the existing absolute deadline.
+          if (
+            imageTextStopListEnabled &&
+            !commercialScanEnabled &&
+            !alternativeConfirmationUsed &&
+            params.deadlineAtMs - Date.now() >= OPTIONAL_CONFIRMATION_HEADROOM_MS &&
+            shouldConfirmImageTextStopListPass(current.primary, params.settings, undefined, true) &&
+            evaluateImageTextStopListDecision({
+              settings: params.settings,
+              images: [{ ...current, confirmation: resolved.pass }],
+              ...(params.isLinkAllowlisted ? { isLinkAllowlisted: params.isLinkAllowlisted } : {}),
+            }).kind !== 'match'
+          ) {
+            const target = resolveImageTextStopListConfirmationCrop(
+              current.primary,
+              params.settings,
+            );
+            if (target || resolved.pass.status === 'no_text') {
+              alternativeConfirmationUsed = true;
+              const alternative = await this.resolvePass({
+                ...passParams,
+                preprocessPass: 'primary',
+                ...(target ? { crop: target.crop } : {}),
+              });
+              if (alternative.kind === 'ready' && !deadlineExpired(params.deadlineAtMs)) {
+                recoveredImageTextMatch = evaluateImageTextStopListDecision({
+                  settings: params.settings,
+                  images: [{ ...current, confirmation: alternative.pass }],
+                  exactWordsOnly: true,
+                  ...(target ? { exactRuleId: target.ruleId } : {}),
+                });
+              }
+            }
+          }
         }
         return { kind: 'ready', value: resolved.pass };
       },
@@ -322,15 +365,17 @@ export class CommercialOcrAnalysisService {
           kind: 'complete',
           decision: scheduled.decision,
           imageTextStopListDecision: imageTextStopListEnabled
-            ? evaluateImageTextStopListDecision({
-                settings: params.settings,
-                images: [...imageTextPasses.values()].sort(
-                  (left, right) => left.imageIndex - right.imageIndex,
-                ),
-                ...(params.isLinkAllowlisted
-                  ? { isLinkAllowlisted: params.isLinkAllowlisted }
-                  : {}),
-              })
+            ? recoveredImageTextMatch?.kind === 'match'
+              ? recoveredImageTextMatch
+              : evaluateImageTextStopListDecision({
+                  settings: params.settings,
+                  images: [...imageTextPasses.values()].sort(
+                    (left, right) => left.imageIndex - right.imageIndex,
+                  ),
+                  ...(params.isLinkAllowlisted
+                    ? { isLinkAllowlisted: params.isLinkAllowlisted }
+                    : {}),
+                })
             : { kind: 'no_action' },
         }
       : scheduled.result;
@@ -341,6 +386,8 @@ export class CommercialOcrAnalysisService {
     contentSha256: string;
     ocrVersion: string;
     pass: CommercialOcrPassName;
+    preprocessPass?: CommercialOcrPassName;
+    crop?: CommercialOcrPreprocessOptions['crop'];
     psm: NativeTesseractPageSegmentationMode;
     authorizeStage: CommercialOcrAuthorizeStage;
     deadlineAtMs: number;
@@ -351,10 +398,14 @@ export class CommercialOcrAnalysisService {
       contentSha256: params.contentSha256,
       ocrVersion: params.ocrVersion,
       pass: params.pass,
-      preprocessProfile: resolveCommercialOcrPreprocessCacheProfile(
-        params.pass,
-        this.preprocessLimits,
-      ),
+      preprocessProfile:
+        resolveCommercialOcrPreprocessCacheProfile(
+          params.preprocessPass ?? params.pass,
+          this.preprocessLimits,
+        ) +
+        (params.crop
+          ? `.crop-v1.${params.crop.left}.${params.crop.top}.${params.crop.width}.${params.crop.height}`
+          : ''),
       psm: params.psm,
     };
     const lookup = await this.cache.read(identity);
@@ -413,6 +464,8 @@ export class CommercialOcrAnalysisService {
     params: {
       rawBytes: Buffer;
       pass: CommercialOcrPassName;
+      preprocessPass?: CommercialOcrPassName;
+      crop?: CommercialOcrPreprocessOptions['crop'];
       psm: NativeTesseractPageSegmentationMode;
       authorizeStage: CommercialOcrAuthorizeStage;
       deadlineAtMs: number;
@@ -424,14 +477,17 @@ export class CommercialOcrAnalysisService {
     if (deadlineExpired(params.deadlineAtMs)) {
       return deadlineIncomplete(params.imageIndex, params.pass);
     }
-    let prepared: Buffer;
+    let prepared: Awaited<ReturnType<CommercialOcrPreprocessor['prepare']>>;
     const preprocessStartedAt = performance.now();
     try {
-      prepared = (
-        await this.preprocessor.prepare(params.rawBytes, params.pass, {
+      prepared = await this.preprocessor.prepare(
+        params.rawBytes,
+        params.preprocessPass ?? params.pass,
+        {
           deadlineAtMs: params.deadlineAtMs,
-        })
-      ).bytes;
+          ...(params.crop ? { crop: params.crop } : {}),
+        },
+      );
     } catch (error: unknown) {
       if (deadlineExpired(params.deadlineAtMs)) {
         return deadlineIncomplete(params.imageIndex, params.pass);
@@ -481,7 +537,7 @@ export class CommercialOcrAnalysisService {
     let result: Awaited<ReturnType<NativeTesseractOcrAdapter['recognize']>>;
     const nativePassStartedAt = performance.now();
     try {
-      result = await this.ocr.recognize(prepared, {
+      result = await this.ocr.recognize(prepared.bytes, {
         psm: params.psm,
         passLabel: params.pass,
         deadlineAtMs: params.deadlineAtMs,
@@ -531,7 +587,10 @@ export class CommercialOcrAnalysisService {
         pass: params.pass,
       };
     }
-    const converted = convertCommercialOcrNativePayload(result);
+    const converted = convertCommercialOcrNativePayload(
+      result,
+      params.pass === 'primary' ? { width: prepared.width, height: prepared.height } : undefined,
+    );
     if (converted.kind === 'rejected') {
       return {
         kind: 'incomplete',

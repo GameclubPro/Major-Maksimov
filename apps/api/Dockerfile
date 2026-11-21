@@ -35,6 +35,7 @@ ENV NODE_ENV=production
 ENV HOME=/home/node
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/russian-trusted-ca-bundle.crt
 LABEL com.maxim.ocr-native-sandbox-capable="true"
+LABEL com.maxim.ocr-native-sandbox-pool-capable="true"
 LABEL com.maxim.photo-native-sandbox-capable="true"
 
 COPY infra/certs/russian-trusted-root-ca.pem /usr/local/share/ca-certificates/russian-trusted-root-ca.crt
@@ -79,9 +80,9 @@ RUN node apps/api/dist/apps/api/src/scripts/commercial-ocr-native-build-manifest
     /app/apps/api/commercial-ocr-native-probe-expectation.json \
   && chmod 0444 /app/apps/api/commercial-ocr-native-build-manifest.json \
     /app/apps/api/commercial-ocr-native-probe-expectation.json \
-  && mkdir -p /run/maxim-ocr /run/maxim-photo /app/apps/api/.migration-prepare \
-  && chown node:node /run/maxim-ocr /run/maxim-photo /app/apps/api/.migration-prepare \
-  && chmod 0700 /run/maxim-ocr /run/maxim-photo /app/apps/api/.migration-prepare
+  && mkdir -p /run/maxim-ocr /run/maxim-ocr-2 /run/maxim-ocr-3 /run/maxim-photo /app/apps/api/.migration-prepare \
+  && chown node:node /run/maxim-ocr /run/maxim-ocr-2 /run/maxim-ocr-3 /run/maxim-photo /app/apps/api/.migration-prepare \
+  && chmod 0700 /run/maxim-ocr /run/maxim-ocr-2 /run/maxim-ocr-3 /run/maxim-photo /app/apps/api/.migration-prepare
 
 EXPOSE 3001
 USER node

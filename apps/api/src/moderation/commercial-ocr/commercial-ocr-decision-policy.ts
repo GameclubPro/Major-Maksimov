@@ -1,3 +1,4 @@
+import type { CommercialOcrBoundingBox } from './native-tesseract-ocr.types';
 import type { ChatSettings } from '../../prisma/prisma-client';
 import {
   CommercialAdDetector,
@@ -50,6 +51,7 @@ export type CommercialOcrPass = {
   text: string;
   confidencePermille: number;
   words?: readonly CommercialOcrPassWord[];
+  rasterSize?: { width: number; height: number };
   criticalEvidence?: readonly CommercialOcrCriticalEvidence[];
 };
 
@@ -58,6 +60,7 @@ export type CommercialOcrPassWord = Readonly<{
   start: number;
   end: number;
   confidencePermille: number;
+  boundingBox?: CommercialOcrBoundingBox;
 }>;
 
 export type CommercialOcrImageDecisionInput = {

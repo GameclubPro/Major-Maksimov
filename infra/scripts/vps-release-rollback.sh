@@ -452,6 +452,12 @@ if [[ "$SELECT_API" -eq 1 ]]; then
     maxim_topology_remove_service SERVICES "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE"
     echo "API rollback target predates $MAXIM_OCR_NATIVE_SANDBOX_SERVICE; the auxiliary will be removed."
   fi
+  # FLAG: Pin the selected image before suppressing extra lanes for a legacy API.
+  if [[ "$(docker image inspect --format '{{.Id}}' "${COMPONENT_IMAGE_REF[api-shared]}")" != "${COMPONENT_IMAGE_ID[api-shared]}" ]]; then
+    echo 'Cannot resolve the immutable API image before selecting its OCR topology.' >&2
+    exit 1
+  fi
+  maxim_topology_adjust_ocr_compose_for_image COMPOSE_FILES "${COMPONENT_IMAGE_ID[api-shared]}"
   maxim_topology_prepare_commercial_ocr_target \
     "$API_SOURCE_SHA" \
     COMPOSE_FILES \

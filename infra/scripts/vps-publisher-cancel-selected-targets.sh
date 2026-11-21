@@ -22,6 +22,7 @@ source "$ROOT_DIR/infra/scripts/lib/legacy-cold-maintenance.sh"
 # shellcheck source=infra/scripts/lib/deploy-topology.sh
 source "$ROOT_DIR/infra/scripts/lib/deploy-topology.sh"
 acquire_deploy_lock
+maxim_topology_require_single_ocr_for_legacy_recovery
 if [[ "$1" == apply ]]; then
   maxim_require_ordinary_effect_authority "$ROOT_DIR"
 fi

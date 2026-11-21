@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { stopWordsPolicySchema } from '@maxim/contracts/settings';
 import { createHash } from 'node:crypto';
 
 import type { ChatSettings } from '../../prisma/prisma-client';
@@ -164,7 +165,7 @@ function harness(
     }),
   };
   const preprocessor = {
-    prepare: jest.fn(async (bytes: Buffer, pass: string) => {
+    prepare: jest.fn(async (bytes: Buffer, pass: string, _options?: unknown) => {
       events.push(`prepare:${pass}:${bytes.toString()}`);
       return { bytes: Buffer.from(`prepared:${pass}:${bytes.toString()}`), width: 100, height: 50 };
     }),
@@ -313,6 +314,139 @@ describe('CommercialOcrAnalysisService', () => {
     expect(
       JSON.stringify((result as { imageTextStopListDecision: unknown }).imageTextStopListDecision),
     ).not.toContain('КАЗИНО');
+  });
+
+  const imageStopListExactSettings = {
+    ...SETTINGS,
+    commercialAdsFilterEnabled: false,
+    stopWordsPolicy: stopWordsPolicySchema.parse({
+      enabled: true,
+      imageScanEnabled: true,
+      rules: [{ id: 'exact', kind: 'WORD', value: 'берёза' }],
+    }),
+  };
+
+  it('confirms light exact text with one grayscale retry after binary confirmation returns no text', async () => {
+    const { service, preprocessor, downloader, ocr, cache } = harness({
+      ocrResults: [
+        nativeResult({
+          text: 'берёза',
+          words: [{ text: 'берёза', start: 0, end: 6, confidence: 96 }],
+        }),
+        noTextResult(),
+        recognizedTextResult('БЕРЁЗА', 'confirmation'),
+      ],
+    });
+    const deadlineAtMs = Date.now() + 60_000;
+
+    await expect(
+      analyze(service, {
+        urls: ['https://i.oneme.ru/1', 'https://i.oneme.ru/2'],
+        settings: imageStopListExactSettings,
+        deadlineAtMs,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'complete',
+      imageTextStopListDecision: { kind: 'match', ruleId: 'exact', imageIndex: 0 },
+    });
+    expect(downloader.download).toHaveBeenCalledTimes(1);
+    expect(preprocessor.prepare.mock.calls.map(([, pass]) => pass)).toEqual([
+      'primary',
+      'confirmation',
+      'primary',
+    ]);
+    expect(ocr.recognize).toHaveBeenLastCalledWith(expect.any(Buffer), {
+      psm: 6,
+      passLabel: 'confirmation',
+      deadlineAtMs,
+    });
+    const [primary, binary, grayscale] = cache.write.mock.calls.map(([identity]) => identity);
+    expect(grayscale).toMatchObject({ pass: 'confirmation', psm: 6 });
+    expect(grayscale!.preprocessProfile).toBe(primary!.preprocessProfile);
+    expect(grayscale!.preprocessProfile).not.toBe(binary!.preprocessProfile);
+  });
+
+  it('confirms the entire exact phrase using a grayscale crop after full-page disagreement', async () => {
+    const { service, preprocessor, cache, ocr } = harness({
+      ocrResults: [
+        nativeResult({
+          text: 'только берёза и сосна рядом\nшум',
+          aggregateConfidence: 72,
+          words: [
+            word('только', 0, 6),
+            word('берёза', 7, 13),
+            word('и', 14, 15),
+            word('сосна', 16, 21),
+            word('рядом', 22, 27),
+            {
+              ...word('шум', 28, 31),
+              confidence: 40,
+              boundingBox: { left: 5, top: 35, width: 9, height: 10 },
+            },
+          ],
+        }),
+        recognizedTextResult('сосна', 'confirmation'),
+        recognizedTextResult('берёза и сосна', 'confirmation'),
+      ],
+    });
+    const settings = {
+      ...imageStopListExactSettings,
+      stopWordsPolicy: stopWordsPolicySchema.parse({
+        enabled: true,
+        imageScanEnabled: true,
+        rules: [{ id: 'phrase', kind: 'PHRASE', value: 'берёза и сосна' }],
+      }),
+    };
+
+    await expect(analyze(service, { settings })).resolves.toMatchObject({
+      kind: 'complete',
+      imageTextStopListDecision: { kind: 'match', ruleId: 'phrase' },
+    });
+    expect(preprocessor.prepare).toHaveBeenLastCalledWith(
+      expect.any(Buffer),
+      'primary',
+      expect.objectContaining({
+        crop: { left: 0, top: 0, width: 39, height: 22 },
+      }),
+    );
+    expect(ocr.recognize).toHaveBeenCalledTimes(3);
+    expect(cache.write.mock.calls[2]?.[0].preprocessProfile).toMatch(/crop-v1\.0\.0\.39\.22$/u);
+  });
+
+  it('allows only one optional grayscale pass even when two images have empty binary confirmation', async () => {
+    const { service, ocr } = harness({
+      ocrResults: [
+        recognizedTextResult('берёза', 'primary'),
+        noTextResult(),
+        recognizedTextResult('сосна', 'confirmation'),
+        recognizedTextResult('берёза', 'primary'),
+        noTextResult(),
+      ],
+    });
+
+    await expect(
+      analyze(service, {
+        urls: ['https://i.oneme.ru/1', 'https://i.oneme.ru/2'],
+        settings: imageStopListExactSettings,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'complete',
+      imageTextStopListDecision: { kind: 'no_action' },
+    });
+    expect(ocr.recognize).toHaveBeenCalledTimes(5);
+  });
+
+  it('keeps the baseline no-match if the optional grayscale confirmation cannot get a native slot', async () => {
+    const { service } = harness({
+      ocrResults: [
+        recognizedTextResult('берёза', 'primary'),
+        noTextResult(),
+        { ok: false, reason: 'capacity_exhausted', durationMs: 1 },
+      ],
+    });
+    await expect(analyze(service, { settings: imageStopListExactSettings })).resolves.toMatchObject(
+      { kind: 'complete', imageTextStopListDecision: { kind: 'no_action' } },
+    );
   });
 
   it('finishes commercial album traversal after an image stop-list match in a combined job', async () => {

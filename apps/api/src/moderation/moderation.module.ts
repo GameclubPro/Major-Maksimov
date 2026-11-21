@@ -91,6 +91,7 @@ import { LinkHistoryRecoveryService } from './link-history-recovery.service';
 import { CommercialOcrAdmissionStore } from './commercial-ocr/commercial-ocr-admission.store';
 import { CommercialOcrAnalysisService } from './commercial-ocr/commercial-ocr-analysis.service';
 import { CommercialOcrCacheStore } from './commercial-ocr/commercial-ocr-cache.store';
+import { NativeOcrSandboxPool } from './commercial-ocr/native-ocr-sandbox.pool';
 import { CommercialOcrEnqueueService } from './commercial-ocr/commercial-ocr-enqueue.service';
 import { CommercialOcrModerationService } from './commercial-ocr/commercial-ocr-moderation.service';
 import { CommercialOcrMetricsService } from './commercial-ocr/commercial-ocr-metrics.service';
@@ -217,6 +218,7 @@ const moderationProviders = [
         ...(commercialOcrWorkerEnabled
           ? [
               CommercialOcrCacheStore,
+              NativeOcrSandboxPool,
               CommercialOcrPreprocessor,
               NativeTesseractOcrAdapter,
               CommercialOcrAnalysisService,

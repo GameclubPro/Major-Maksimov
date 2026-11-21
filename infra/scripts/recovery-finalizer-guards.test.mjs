@@ -87,7 +87,7 @@ test('finalizer binds every active component to the target ref and re-proves str
   assert.match(runtime, /"\$image_id" == "\$expected_id"/u);
   assert.match(finalizer, /for service in "\$\{MAXIM_PRODUCTION_API_SERVICES\[@\]\}"/u);
   assert.match(finalizer, /commercial-ocr-runtime-inventory\.mjs/u);
-  assert.match(finalizer, /MAXIM_OCR_NATIVE_SANDBOX_SERVICE/u);
+  assert.match(finalizer, /maxim_topology_ocr_services_for_compose/u);
   assert.match(finalizer, /maxim_topology_verify_ocr_native_sandbox_runtime/u);
   assert.match(finalizer, /reviewedAuxiliaryCount === value\.expectedAuxiliaryCount/u);
 

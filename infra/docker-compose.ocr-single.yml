@@ -1,0 +1,43 @@
+# Immutable rollback to the pre-pool API. The active image determines when to apply this file.
+x-ocr-single-admission: &ocr-single-admission
+  COMMERCIAL_OCR_MAX_GLOBAL_IMAGE_UNITS: ${COMMERCIAL_OCR_MAX_GLOBAL_IMAGE_UNITS:-16}
+  COMMERCIAL_OCR_MAX_CHAT_IMAGE_UNITS: ${COMMERCIAL_OCR_MAX_CHAT_IMAGE_UNITS:-10}
+
+services:
+  ocr-native-sandbox-2: !reset null
+  ocr-native-sandbox-3: !reset null
+  api-media-analysis:
+    environment:
+      <<: *ocr-single-admission
+      COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS: !reset null
+    depends_on:
+      ocr-native-sandbox-2: !reset null
+      ocr-native-sandbox-3: !reset null
+    volumes: !override
+      - ocr_native_ipc:/run/maxim-ocr:ro
+  api-ingress:
+    environment: *ocr-single-admission
+  api-admin:
+    environment: *ocr-single-admission
+  api-enqueue:
+    environment: *ocr-single-admission
+  api-moderation:
+    environment: *ocr-single-admission
+  api-moderation-critical:
+    environment: *ocr-single-admission
+  api-moderation-join:
+    environment: *ocr-single-admission
+  api-moderation-realtime-b:
+    environment: *ocr-single-admission
+  api-moderation-realtime-c:
+    environment: *ocr-single-admission
+  api-moderation-realtime-d:
+    environment: *ocr-single-admission
+  api-moderation-background:
+    environment: *ocr-single-admission
+  api-action:
+    environment: *ocr-single-admission
+  api-message-retention:
+    environment: *ocr-single-admission
+  api-publisher:
+    environment: *ocr-single-admission

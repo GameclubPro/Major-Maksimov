@@ -9,6 +9,7 @@ import {
 } from './commercial-ocr-behavior-identity';
 import type {
   CommercialOcrPreparedImage,
+  CommercialOcrPreprocessOptions,
   CommercialOcrPassName,
 } from './commercial-ocr-preprocess-config';
 import {
@@ -164,6 +165,11 @@ export class NativeOcrSandboxClient {
     );
   }
 
+  invalidateVerification(): void {
+    this.verified = false;
+    this.verifiedAtMs = 0;
+  }
+
   getStatus(): NativeOcrSandboxBoundaryStatus {
     return Object.freeze({
       kind: this.socketPath ? 'unix_socket_sandbox' : 'local_worker',
@@ -194,14 +200,18 @@ export class NativeOcrSandboxClient {
     image: Buffer,
     pass: CommercialOcrPassName,
     timeoutMs: number,
-    options: Readonly<{ deadlineAtMs?: number }> = {},
+    options: Readonly<CommercialOcrPreprocessOptions> = {},
   ): Promise<CommercialOcrPreparedImage> {
     requireImage(image, this.maxSourceImageBytes);
     const boundedTimeoutMs = requireTimeout(timeoutMs, 1, 5_000);
     const response = await this.request({
       requestKind: NATIVE_OCR_SANDBOX_FRAME_KINDS.preprocessRequest,
       responseKind: NATIVE_OCR_SANDBOX_FRAME_KINDS.preprocessResponse,
-      metadata: { pass, timeoutMs: boundedTimeoutMs },
+      metadata: {
+        pass,
+        timeoutMs: boundedTimeoutMs,
+        ...(options.crop ? { crop: options.crop } : {}),
+      },
       payload: image,
       requestPayloadBytes: this.maxSourceImageBytes,
       timeoutMs: boundedTimeoutMs + NATIVE_OCR_SANDBOX_IPC_GRACE_MS,
@@ -224,7 +234,8 @@ export class NativeOcrSandboxClient {
       (width as number) < 1 ||
       !Number.isSafeInteger(height) ||
       (height as number) < 1 ||
-      response.payload.byteLength < 1
+      response.payload.byteLength < 1 ||
+      (options.crop && (width !== options.crop.width || height !== options.crop.height))
     ) {
       this.verified = false;
       this.verifiedAtMs = 0;

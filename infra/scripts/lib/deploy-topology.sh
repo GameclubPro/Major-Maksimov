@@ -23,6 +23,9 @@ MAXIM_PRODUCTION_API_SERVICES=(
 MAXIM_MEDIA_ANALYSIS_SERVICE="api-media-analysis"
 MAXIM_OCR_NATIVE_SANDBOX_SERVICE="ocr-native-sandbox"
 MAXIM_OCR_NATIVE_SANDBOX_CAPABILITY_LABEL="com.maxim.ocr-native-sandbox-capable"
+MAXIM_OCR_NATIVE_SANDBOX_POOL_CAPABILITY_LABEL="com.maxim.ocr-native-sandbox-pool-capable"
+MAXIM_OCR_NATIVE_SANDBOX_POOL_MEMBERS=(ocr-native-sandbox-2 ocr-native-sandbox-3)
+MAXIM_OCR_NATIVE_SANDBOX_POOL_PATHS="/run/maxim-ocr-2/native-ocr.sock,/run/maxim-ocr-3/native-ocr.sock"
 MAXIM_IMAGE_TEXT_STOP_LIST_BINDING_SOURCE="apps/api/src/moderation/commercial-ocr/image-text-stop-list-binding.ts"
 MAXIM_IMAGE_TEXT_STOP_LIST_DELETE_EXECUTOR_SOURCE="apps/api/src/moderation/moderation-delete-intent.service.ts"
 MAXIM_PUBLISHER_SERVICE="api-publisher"
@@ -111,6 +114,83 @@ maxim_topology_git_has_commercial_ocr_raster_smoke() {
 
 maxim_topology_git_has_ocr_native_sandbox() {
   maxim_topology_git_compose_has_service "$1" "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE"
+}
+
+maxim_topology_require_single_ocr_for_legacy_recovery() {
+  local service containers
+  for service in "${MAXIM_OCR_NATIVE_SANDBOX_POOL_MEMBERS[@]}"; do
+    containers="$(docker ps --all --quiet --no-trunc \
+      --filter 'label=com.docker.compose.project=infra' \
+      --filter "label=com.docker.compose.service=$service" 2>/dev/null)" || return 1
+    if [[ -n "$containers" ]]; then
+      echo 'The selected recovery protocol only accepts a single OCR worker. Use the guarded immutable rollback before running it.' >&2
+      return 2
+    fi
+  done
+}
+
+maxim_topology_ocr_pool_member_paths() {
+  case "$1" in
+    ocr-native-sandbox) printf '%s\n' /run/maxim-ocr ocr_native_ipc ;;
+    ocr-native-sandbox-2) printf '%s\n' /run/maxim-ocr-2 ocr_native_ipc_2 ;;
+    ocr-native-sandbox-3) printf '%s\n' /run/maxim-ocr-3 ocr_native_ipc_3 ;;
+    *) return 2 ;;
+  esac
+}
+
+maxim_topology_ocr_services_for_compose() {
+  local -n ocr_compose_args="$1"
+  local service_names
+  service_names="$(docker compose "${ocr_compose_args[@]}" config --services 2>/dev/null)" || return 1
+  local members=()
+  local service
+  for service in "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" "${MAXIM_OCR_NATIVE_SANDBOX_POOL_MEMBERS[@]}"; do
+    if grep -Fxq -- "$service" <<<"$service_names"; then
+      members+=("$service")
+    fi
+  done
+  if [[ "${#members[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "${#members[@]}" -ne 3 &&
+    ( "${#members[@]}" -ne 1 || "${members[0]}" != "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" ) ]]; then
+    echo 'OCR Compose must define the exact singleton or the complete three-member pool.' >&2
+    return 1
+  fi
+  printf '%s\n' "${members[@]}"
+}
+
+maxim_topology_ocr_compose_csv() {
+  local services
+  services="$(maxim_topology_ocr_services_for_compose "$1")" || return 1
+  [[ -n "$services" ]] || return 1
+  printf '%s' "${services//$'\n'/,}"
+}
+
+maxim_topology_require_ocr_pool_source_parity() {
+  local commit_sha="$1"
+  local compose_args_var="$2"
+  local service status
+  local members=()
+  local effective
+  for service in "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" "${MAXIM_OCR_NATIVE_SANDBOX_POOL_MEMBERS[@]}"; do
+    if maxim_topology_git_compose_has_service "$commit_sha" "$service"; then
+      members+=("$service")
+    else
+      status=$?
+      [[ "$status" -eq 1 ]] || return "$status"
+    fi
+  done
+  # FLAG: Older images cannot mount or verify the additional sockets. Inspect the
+  # target before any mutation, including during rollback with preserved Compose.
+  effective="$(maxim_topology_ocr_services_for_compose "$compose_args_var")" || return 1
+  if [[ "${#members[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$(printf '%s\n' "${members[@]}")" != "$effective" ]]; then
+    echo 'OCR topology differs from the selected API source; use a compatible rollback or forward release.' >&2
+    return 1
+  fi
 }
 
 maxim_topology_require_image_text_stop_list_delete_guard() {
@@ -1898,7 +1978,8 @@ maxim_topology_prepare_commercial_ocr_target() {
   fi
   maxim_topology_require_media_analysis_rollout_config "$compose_args_var" "$commit_sha"
   if [[ "$has_ocr_native_sandbox" -eq 1 ]]; then
-    maxim_topology_require_ocr_native_sandbox_config "$compose_args_var"
+    maxim_topology_require_ocr_native_sandbox_config "$compose_args_var" || return 1
+    maxim_topology_require_ocr_pool_source_parity "$commit_sha" "$compose_args_var" || return 1
   fi
 }
 
@@ -2000,6 +2081,7 @@ maxim_topology_stop_media_analysis_before_api_transition() {
     done
     container_ids=()
   done
+  maxim_topology_reconcile_extra_ocr_containers "$compose_args_var" stop
 }
 
 maxim_topology_remove_ocr_native_sandbox_container() {
@@ -2014,6 +2096,7 @@ maxim_topology_remove_ocr_native_sandbox_container() {
     echo "Could not inspect the current $MAXIM_OCR_NATIVE_SANDBOX_SERVICE container." >&2
     return 1
   fi
+  maxim_topology_reconcile_extra_ocr_containers "$compose_args_var" remove || return 1
   [[ -n "$container_list" ]] || return 0
   mapfile -t container_ids <<<"$container_list"
   echo "Stopping and removing $MAXIM_OCR_NATIVE_SANDBOX_SERVICE for a pre-sandbox API target..."
@@ -2037,6 +2120,49 @@ maxim_topology_require_ocr_native_sandbox_absent() {
     echo "A pre-sandbox API runtime still has $MAXIM_OCR_NATIVE_SANDBOX_SERVICE." >&2
     return 1
   fi
+  maxim_topology_reconcile_extra_ocr_containers "$compose_args_var" absent
+}
+
+maxim_topology_reconcile_extra_ocr_containers() {
+  local -n ocr_compose_args="$1"
+  local mode="$2"
+  local project=''
+  local i service container_list container_id observed
+  for ((i = 0; i + 1 < ${#ocr_compose_args[@]}; i += 1)); do
+    if [[ "${ocr_compose_args[i]}" == -p ]]; then
+      project="${ocr_compose_args[i+1]}"
+      break
+    fi
+  done
+  [[ "$project" == infra || "$project" == infra-scale ]] || return 2
+
+  for service in "${MAXIM_OCR_NATIVE_SANDBOX_POOL_MEMBERS[@]}"; do
+    container_list="$(docker ps -a -q --no-trunc \
+      --filter "label=com.docker.compose.project=$project" \
+      --filter "label=com.docker.compose.service=$service" 2>/dev/null)" || return 1
+    [[ -n "$container_list" ]] || continue
+    if [[ "$mode" == absent || ! "$container_list" =~ ^[a-f0-9]{64}$ ]]; then
+      echo "Unexpected OCR pool container inventory for $service." >&2
+      return 1
+    fi
+    container_id="$container_list"
+    observed="$(docker inspect --format '{{.Name}}|{{index .Config.Labels "com.maxim.ocr-native-sandbox"}}|{{.State.Running}}' "$container_id")" || return 1
+    case "$observed" in
+      "/$project-$service-1|true|true")
+        docker stop --time 30 "$container_id" >/dev/null || return 1
+        [[ "$(docker inspect --format '{{.State.Running}}' "$container_id")" == false ]] || return 1
+        ;;
+      "/$project-$service-1|true|false") ;;
+      *)
+        echo "Refusing to manage an unrecognized OCR pool container for $service." >&2
+        return 1
+        ;;
+    esac
+    if [[ "$mode" == remove ]]; then
+      # IPC volumes are retained. Remove only this proved stopped auxiliary.
+      docker rm "$container_id" >/dev/null || return 1
+    fi
+  done
 }
 
 maxim_topology_require_commercial_ocr_baseline_guard() {
@@ -2133,18 +2259,28 @@ maxim_topology_require_ocr_native_sandbox_config() {
     | node -e '
         const { readFileSync } = require("node:fs");
         const config = JSON.parse(readFileSync(0).toString("utf8"));
-        const sandbox = config?.services?.["ocr-native-sandbox"];
+        const services = config?.services ?? {};
+        const primary = ["ocr-native-sandbox", "/run/maxim-ocr", "ocr_native_ipc"];
+        const extras = [
+          ["ocr-native-sandbox-2", "/run/maxim-ocr-2", "ocr_native_ipc_2"],
+          ["ocr-native-sandbox-3", "/run/maxim-ocr-3", "ocr_native_ipc_3"],
+        ];
         const media = config?.services?.["api-media-analysis"];
         const expectedCommand = [
           "node",
           "apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js",
         ];
         const expectedProbe = ["CMD", ...expectedCommand, "--probe"];
+        const poolKey = "COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS";
+        const poolPaths = media?.environment?.[poolKey] ?? "";
+        const hasPool = extras.every(([service]) => services[service]);
+        const members = hasPool ? [primary, ...extras] : [primary];
+        if (hasPool ? poolPaths !== extras.map(([, directory]) => directory + "/native-ocr.sock").join(",") :
+          poolPaths !== "" || extras.some(([service]) => services[service])) process.exit(1);
         const expectedEnvironment = {
           COMMERCIAL_OCR_MAX_INPUT_PIXELS: "40000000",
           COMMERCIAL_OCR_MAX_OUTPUT_PIXELS: "3000000",
           COMMERCIAL_OCR_MAX_SIDE: "2000",
-          COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: "/run/maxim-ocr/native-ocr.sock",
           COMMERCIAL_OCR_TESSERACT_BINARY: "tesseract",
           COMMERCIAL_OCR_TESSERACT_CONCURRENCY: "1",
           COMMERCIAL_OCR_TESSERACT_MAX_IMAGE_BYTES: "16777216",
@@ -2163,48 +2299,55 @@ maxim_topology_require_ocr_native_sandbox_config() {
           left && typeof left === "object" && !Array.isArray(left) &&
           Object.keys(left).length === Object.keys(right).length &&
           Object.entries(right).every(([key, value]) => left[key] === value);
-        const sandboxVolumes = Array.isArray(sandbox?.volumes) ? sandbox.volumes : [];
-        const mediaVolumes = Array.isArray(media?.volumes) ? media.volumes : [];
-        const ipcConsumers = Object.entries(config?.services ?? {})
-          .filter(([, service]) =>
-            (service?.volumes ?? []).some((volume) => volume?.source === "ocr_native_ipc"),
-          )
-          .map(([name]) => name)
-          .sort();
-        const sandboxVolume = sandboxVolumes[0];
-        const mediaVolume = mediaVolumes.find((volume) => volume?.target === "/run/maxim-ocr");
-        const valid =
-          sandbox && media &&
-          sandbox.labels?.["com.maxim.ocr-native-sandbox"] === "true" &&
-          sandbox.network_mode === "none" && sandbox.networks === undefined &&
-          sandbox.user === "1000:1000" && sandbox.init === true &&
-          sandbox.read_only === true && sandbox.privileged !== true &&
-          sandbox.cpus === 1 && sandbox.mem_limit === "1073741824" &&
-          sandbox.pids_limit === 128 && sandbox.deploy?.replicas === 1 &&
-          sandbox.restart === "unless-stopped" &&
-          sameStrings(sandbox.cap_drop, ["ALL"]) &&
-          sameStrings(sandbox.security_opt, ["no-new-privileges:true"]) &&
-          sameStrings(sandbox.tmpfs, ["/tmp:size=64m,mode=1777,uid=1000,gid=1000"]) &&
-          sameStrings(sandbox.command, expectedCommand) &&
-          sameStrings(sandbox.healthcheck?.test, expectedProbe) &&
-          sandbox.healthcheck?.timeout === "8s" &&
-          sandbox.healthcheck?.interval === "10s" &&
-          sandbox.healthcheck?.retries === 3 &&
-          sandbox.healthcheck?.start_period === "20s" &&
-          exactObject(sandbox.environment, expectedEnvironment) &&
-          sandbox.secrets === undefined && sandbox.configs === undefined &&
-          sandbox.ports === undefined && sandbox.expose === undefined &&
-          sandboxVolumes.length === 1 && sandboxVolume?.type === "volume" &&
-          sandboxVolume?.source === "ocr_native_ipc" &&
-          sandboxVolume?.target === "/run/maxim-ocr" && sandboxVolume?.read_only !== true &&
-          mediaVolume?.type === "volume" && mediaVolume?.source === "ocr_native_ipc" &&
-          mediaVolume?.read_only === true &&
-          sameStrings(ipcConsumers, ["api-media-analysis", "ocr-native-sandbox"]) &&
-          Object.entries(expectedEnvironment).every(
-            ([key, value]) => media?.environment?.[key] === value,
-          ) &&
-          media?.depends_on?.["ocr-native-sandbox"]?.condition === "service_healthy";
-        process.exit(valid ? 0 : 1);
+        const validForMember = ([service, directory, volume]) => {
+          const sandbox = services[service];
+          const socketEnvironment = { ...expectedEnvironment, COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: directory + "/native-ocr.sock" };
+          const sandboxVolumes = Array.isArray(sandbox?.volumes) ? sandbox.volumes : [];
+          const mediaVolumes = Array.isArray(media?.volumes) ? media.volumes : [];
+          const ipcConsumers = Object.entries(config?.services ?? {})
+            .filter(([, service]) =>
+              (service?.volumes ?? []).some((mount) => mount?.source === volume),
+            )
+            .map(([name]) => name)
+            .sort();
+          const sandboxVolume = sandboxVolumes[0];
+          const mediaVolume = mediaVolumes.find((volume) => volume?.target === directory);
+          const valid =
+            sandbox && media &&
+            sandbox.labels?.["com.maxim.ocr-native-sandbox"] === "true" &&
+            sandbox.network_mode === "none" && sandbox.networks === undefined &&
+            sandbox.user === "1000:1000" && sandbox.init === true &&
+            sandbox.read_only === true && sandbox.privileged !== true &&
+            sandbox.cpus === 1 && sandbox.mem_limit === "1073741824" &&
+            sandbox.pids_limit === 128 && sandbox.deploy?.replicas === 1 &&
+            sandbox.restart === "unless-stopped" &&
+            sameStrings(sandbox.cap_drop, ["ALL"]) &&
+            sameStrings(sandbox.security_opt, ["no-new-privileges:true"]) &&
+            sameStrings(sandbox.tmpfs, ["/tmp:size=64m,mode=1777,uid=1000,gid=1000"]) &&
+            sameStrings(sandbox.command, expectedCommand) &&
+            sameStrings(sandbox.healthcheck?.test, expectedProbe) &&
+            sandbox.healthcheck?.timeout === "8s" &&
+            sandbox.healthcheck?.interval === "10s" &&
+            sandbox.healthcheck?.retries === 3 &&
+            sandbox.healthcheck?.start_period === "20s" &&
+            exactObject(sandbox.environment, socketEnvironment) &&
+            sandbox.secrets === undefined && sandbox.configs === undefined &&
+            sandbox.ports === undefined && sandbox.expose === undefined &&
+            sandboxVolumes.length === 1 && sandboxVolume?.type === "volume" &&
+            sandboxVolume?.source === volume &&
+            sandboxVolume?.target === directory && sandboxVolume?.read_only !== true &&
+            mediaVolume?.type === "volume" && mediaVolume?.source === volume &&
+            mediaVolume?.read_only === true &&
+            sameStrings(ipcConsumers, ["api-media-analysis", service]) &&
+            Object.entries(expectedEnvironment).every(
+              ([key, value]) => media?.environment?.[key] === value,
+            ) &&
+            media?.depends_on?.[service]?.condition === "service_healthy";
+          return valid;
+        };
+        const primarySocketMatches =
+          media?.environment?.COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH === primary[1] + "/native-ocr.sock";
+        process.exit(primarySocketMatches && members.every(validForMember) ? 0 : 1);
       ' >/dev/null 2>&1; then
     echo "Refusing OCR sandbox rollout unless the effective no-network/no-secret Compose boundary is exact." >&2
     return 1
@@ -2219,24 +2362,34 @@ maxim_topology_wait_for_ocr_native_sandbox() {
   local container_list
   local container_ids=()
   local health
+  local members_raw service ready_count
+  local members=()
+
+  members_raw="$(maxim_topology_ocr_services_for_compose "$compose_args_var")" || return 1
+  [[ -n "$members_raw" ]] || return 1
+  mapfile -t members <<<"$members_raw"
 
   while ((SECONDS < deadline)); do
-    container_list="$(
-      docker compose "${compose_args_ref[@]}" ps --status running -q \
-        "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" 2>/dev/null || true
-    )"
-    container_ids=()
-    [[ -z "$container_list" ]] || mapfile -t container_ids <<<"$container_list"
-    if [[ "${#container_ids[@]}" -eq 1 ]]; then
-      health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
-        "${container_ids[0]}" 2>/dev/null || true)"
-      if [[ "$health" == "healthy" ]]; then
-        return 0
+    ready_count=0
+    for service in "${members[@]}"; do
+      container_list="$(
+        docker compose "${compose_args_ref[@]}" ps --status running -q \
+          "$service" 2>/dev/null || true
+      )"
+      container_ids=()
+      [[ -z "$container_list" ]] || mapfile -t container_ids <<<"$container_list"
+      if [[ "${#container_ids[@]}" -eq 1 ]]; then
+        health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+          "${container_ids[0]}" 2>/dev/null || true)"
+        if [[ "$health" == "healthy" ]]; then
+          ready_count=$((ready_count + 1))
+        fi
       fi
-    fi
+    done
+    [[ "$ready_count" -ne "${#members[@]}" ]] || return 0
     sleep 1
   done
-  echo "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE did not become a unique healthy container." >&2
+  echo "OCR sandboxes did not each become a unique healthy container." >&2
   return 1
 }
 
@@ -2245,10 +2398,20 @@ maxim_topology_recreate_ocr_native_sandbox() {
   local expected_image_id="${2:-}"
   local -n compose_args_ref="$compose_args_var"
 
-  echo "Recreating isolated OCR native sandbox..."
+  local members_raw
+  local members=()
+  members_raw="$(maxim_topology_ocr_services_for_compose "$compose_args_var")" || return 1
+  [[ -n "$members_raw" ]] || return 1
+  mapfile -t members <<<"$members_raw"
+  if [[ "${#members[@]}" -eq 3 ]]; then
+    maxim_topology_require_ocr_pool_image_capability "$expected_image_id" || return 1
+  else
+    maxim_topology_reconcile_extra_ocr_containers "$compose_args_var" remove || return 1
+  fi
+  echo "Recreating isolated OCR native sandbox services..."
   docker compose "${compose_args_ref[@]}" up -d --no-deps --no-build --force-recreate \
-    "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE"
-  maxim_topology_wait_for_ocr_native_sandbox "$compose_args_var" 180
+    "${members[@]}" || return 1
+  maxim_topology_wait_for_ocr_native_sandbox "$compose_args_var" 180 || return 1
   maxim_topology_verify_ocr_native_sandbox_runtime \
     "$compose_args_var" "$expected_image_id" sandbox-only
 }
@@ -2258,7 +2421,36 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
   local expected_image_id="${2:-}"
   local media_policy="${3:-with-media}"
   local expected_media_id="${4:-}"
+  local members_raw service pool_paths=''
+  local members=()
+  members_raw="$(maxim_topology_ocr_services_for_compose "$compose_args_var")" || return 1
+  [[ -n "$members_raw" ]] || return 1
+  mapfile -t members <<<"$members_raw"
+  if [[ "${#members[@]}" -eq 3 ]]; then
+    pool_paths="$MAXIM_OCR_NATIVE_SANDBOX_POOL_PATHS"
+  else
+    maxim_topology_reconcile_extra_ocr_containers "$compose_args_var" absent || return 1
+  fi
+  for service in "${members[@]}"; do
+    maxim_topology_verify_one_ocr_native_sandbox "$compose_args_var" "$expected_image_id" \
+      "$media_policy" "$expected_media_id" "$service" "$pool_paths" || return 1
+  done
+}
+
+maxim_topology_verify_one_ocr_native_sandbox() {
+  local compose_args_var="$1"
+  local expected_image_id="${2:-}"
+  local media_policy="${3:-with-media}"
+  local expected_media_id="${4:-}"
   local -n compose_args_ref="$compose_args_var"
+  local service="$5"
+  local pool_paths="$6"
+  local member_paths
+  local member_path=()
+  member_paths="$(maxim_topology_ocr_pool_member_paths "$service")" || return 1
+  mapfile -t member_path <<<"$member_paths"
+  local socket_directory="${member_path[0]}"
+  local volume_suffix="${member_path[1]}"
   local sandbox_list
   local media_list
   local sandbox_ids=()
@@ -2283,7 +2475,7 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
   esac
   sandbox_list="$(
     docker compose "${compose_args_ref[@]}" ps --status running -q \
-      "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" 2>/dev/null
+      "$service" 2>/dev/null
   )" || return 1
   [[ -z "$sandbox_list" ]] || mapfile -t sandbox_ids <<<"$sandbox_list"
   if [[ "${#sandbox_ids[@]}" -ne 1 ]]; then
@@ -2307,10 +2499,10 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
 
   socket_volume_name="$(
     docker inspect --format \
-      '{{range .Mounts}}{{if eq .Destination "/run/maxim-ocr"}}{{.Name}}{{end}}{{end}}' \
+      "{{range .Mounts}}{{if eq .Destination \"$socket_directory\"}}{{.Name}}{{end}}{{end}}" \
       "${sandbox_ids[0]}" 2>/dev/null
   )" || return 1
-  if [[ ! "$socket_volume_name" =~ ^infra(-scale)?_ocr_native_ipc$ ]]; then
+  if [[ ! "$socket_volume_name" =~ ^infra(-scale)?_$volume_suffix$ ]]; then
     echo "OCR sandbox uses an invalid IPC volume identity." >&2
     return 1
   fi
@@ -2335,6 +2527,10 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
         const { readFileSync } = require("node:fs");
         const expectedImageId = process.argv[1];
         const mediaPolicy = process.argv[2];
+        const service = process.argv[4];
+        const directory = process.argv[5];
+        const volumeSuffix = process.argv[6];
+        const poolPaths = process.argv[7];
         const containers = JSON.parse(readFileSync(0).toString("utf8"));
         const sandbox = containers[0];
         const media = containers[1];
@@ -2383,9 +2579,10 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
           sandbox?.State?.Running === true && sandbox?.State?.Status === "running" &&
           sandbox?.State?.Health?.Status === "healthy" &&
           (!expectedImageId || sandbox?.Image === expectedImageId) &&
-          labels["com.docker.compose.service"] === "ocr-native-sandbox" &&
+          labels["com.docker.compose.service"] === service &&
           labels["com.maxim.ocr-native-sandbox"] === "true" &&
           labels["com.maxim.ocr-native-sandbox-capable"] === "true" &&
+          (poolPaths === "" || labels["com.maxim.ocr-native-sandbox-pool-capable"] === "true") &&
           typeof project === "string" && /^(?:infra|infra-scale)$/u.test(project) &&
           (project !== "infra" || labels["com.maxim.release-protected"] === "true") &&
           sandbox?.Config?.User === "1000:1000" &&
@@ -2393,7 +2590,7 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
           envValid &&
           env.get("NODE_ENV") === "production" &&
           env.get("COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH") ===
-            "/run/maxim-ocr/native-ocr.sock" &&
+            directory + "/native-ocr.sock" &&
           env.get("PHOTO_DUPLICATE_MAX_BYTES") === "16777216" &&
           env.get("COMMERCIAL_OCR_MAX_INPUT_PIXELS") === "40000000" &&
           env.get("COMMERCIAL_OCR_MAX_OUTPUT_PIXELS") === "3000000" &&
@@ -2419,12 +2616,12 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
           Object.keys(tmpfs).length === 1 &&
           typeof tmpfs["/tmp"] === "string" && tmpfs["/tmp"].includes("size=64m") &&
           sandboxMounts.length === 1 && socketMount?.Type === "volume" &&
-          socketMount?.Name === `${project}_ocr_native_ipc` &&
-          socketMount?.Destination === "/run/maxim-ocr" && socketMount?.RW === true &&
+          socketMount?.Name === `${project}_${volumeSuffix}` &&
+          socketMount?.Destination === directory && socketMount?.RW === true &&
           networkNames.every((networkName) => networkName === "none");
         if (mediaPolicy !== "sandbox-only") {
           const mediaMounts = (media?.Mounts ?? []).filter(
-            (mount) => mount?.Destination === "/run/maxim-ocr",
+            (mount) => mount?.Destination === directory,
           );
           const mediaEnvironment = new Map();
           let mediaEnvironmentValid = Array.isArray(media?.Config?.Env);
@@ -2438,7 +2635,7 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
           }
           const nativeProfileKeys = [
             "COMMERCIAL_OCR_MAX_INPUT_PIXELS", "COMMERCIAL_OCR_MAX_OUTPUT_PIXELS",
-            "COMMERCIAL_OCR_MAX_SIDE", "COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH",
+            "COMMERCIAL_OCR_MAX_SIDE",
             "COMMERCIAL_OCR_TESSERACT_BINARY", "COMMERCIAL_OCR_TESSERACT_CONCURRENCY",
             "COMMERCIAL_OCR_TESSERACT_MAX_IMAGE_BYTES",
             "COMMERCIAL_OCR_TESSERACT_MAX_OUTPUT_BYTES", "COMMERCIAL_OCR_TESSERACT_MAX_QUEUE",
@@ -2460,12 +2657,15 @@ maxim_topology_verify_ocr_native_sandbox_runtime() {
             ? stoppedMediaValid : media?.State?.Running === true) &&
             (!expectedImageId || media?.Image === expectedImageId) &&
             mediaEnvironmentValid &&
+            mediaEnvironment.get("COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH") === "/run/maxim-ocr/native-ocr.sock" &&
+            (mediaEnvironment.get("COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS") ?? "") === poolPaths &&
             nativeProfileKeys.every((key) => mediaEnvironment.get(key) === env.get(key)) &&
             mediaMounts.length === 1 && mediaMounts[0]?.Type === "volume" &&
             mediaMounts[0]?.Name === socketMount?.Name && mediaMounts[0]?.RW === false;
         }
         process.exit(valid ? 0 : 1);
-      ' "$expected_image_id" "$media_policy" "$expected_media_id" >/dev/null 2>&1; then
+      ' "$expected_image_id" "$media_policy" "$expected_media_id" \
+      "$service" "$socket_directory" "$volume_suffix" "$pool_paths" >/dev/null 2>&1; then
     echo "OCR sandbox runtime failed image, isolation, health, or IPC-volume attestation." >&2
     return 1
   fi
@@ -2475,10 +2675,14 @@ maxim_topology_verify_ocr_native_sandbox_for_image() {
   maxim_topology_verify_photo_native_sandbox_for_image "$1" "$2" || return 1
   local compose_args_var="$1"
   local image="$2"
+  local -n original_compose_args="$compose_args_var"
+  # shellcheck disable=SC2034
+  local active_ocr_compose_args=("${original_compose_args[@]}")
   local capability_status
 
   if maxim_topology_image_has_ocr_native_sandbox "$image"; then
-    maxim_topology_verify_ocr_native_sandbox_runtime "$compose_args_var" "$image" with-media
+    maxim_topology_adjust_ocr_compose_for_image active_ocr_compose_args "$image" || return 1
+    maxim_topology_verify_ocr_native_sandbox_runtime active_ocr_compose_args "$image" with-media
     return
   else
     capability_status=$?
@@ -2487,6 +2691,42 @@ maxim_topology_verify_ocr_native_sandbox_for_image() {
     return "$capability_status"
   fi
   maxim_topology_require_ocr_native_sandbox_absent "$compose_args_var"
+}
+
+maxim_topology_image_has_ocr_pool_capability() {
+  local image="$1"
+  local capability
+  [[ -n "$image" ]] || return 2
+  capability="$(docker image inspect \
+    --format "{{index .Config.Labels \"$MAXIM_OCR_NATIVE_SANDBOX_POOL_CAPABILITY_LABEL\"}}" "$image" 2>/dev/null)" || return 2
+  case "$capability" in
+    true) return 0 ;;
+    '' | '<no value>') return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+maxim_topology_adjust_ocr_compose_for_image() {
+  local -n ocr_adjust_compose_args="$1"
+  local image="$2"
+  local found_members status
+  if maxim_topology_image_has_ocr_pool_capability "$image"; then
+    return 0
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] || return "$status"
+  fi
+  found_members="$(maxim_topology_ocr_services_for_compose "$1")" || return 1
+  if [[ "$found_members" == *$'\n'* ]]; then
+    ocr_adjust_compose_args+=(-f infra/docker-compose.ocr-single.yml)
+  fi
+}
+
+maxim_topology_require_ocr_pool_image_capability() {
+  if ! maxim_topology_image_has_ocr_pool_capability "$1"; then
+    echo 'Selected API image does not support the reviewed OCR pool.' >&2
+    return 1
+  fi
 }
 
 maxim_topology_require_ocr_native_sandbox_image_capability() {
@@ -2540,9 +2780,6 @@ maxim_topology_smoke_ocr_native_sandbox_uds() {
   local compose_args_var="$1"
   local expected_image_id="${2:-}"
   local client_mode="${3:-running-media}"
-  local -n compose_args_ref="$compose_args_var"
-  local output
-  local sandbox_id
   local runtime_media_policy="with-media"
 
   case "$client_mode" in
@@ -2554,49 +2791,53 @@ maxim_topology_smoke_ocr_native_sandbox_uds() {
       ;;
   esac
 
-  maxim_topology_require_ocr_native_sandbox_config "$compose_args_var"
-  maxim_topology_wait_for_ocr_native_sandbox "$compose_args_var" 180
+  maxim_topology_require_ocr_native_sandbox_config "$compose_args_var" || return 1
+  maxim_topology_wait_for_ocr_native_sandbox "$compose_args_var" 180 || return 1
+  maxim_topology_verify_ocr_native_sandbox_runtime \
+    "$compose_args_var" "$expected_image_id" "$runtime_media_policy" || return 1
+
+  maxim_topology_smoke_each_ocr_socket "$compose_args_var" "$client_mode" || return 1
   maxim_topology_verify_ocr_native_sandbox_runtime \
     "$compose_args_var" "$expected_image_id" "$runtime_media_policy"
+}
 
-  if [[ "$client_mode" == "prestart" ]]; then
-    output="$(
-      docker compose "${compose_args_ref[@]}" run --rm --no-deps --pull never \
-        --entrypoint node "$MAXIM_MEDIA_ANALYSIS_SERVICE" \
-        apps/api/dist/apps/api/src/scripts/smoke-commercial-ocr-worker.js 2>&1
-    )" || {
-      echo "Pre-fence native OCR UDS raster smoke failed." >&2
+maxim_topology_smoke_each_ocr_socket() {
+  local compose_args_var="$1"
+  local client_mode="$2"
+  local -n ocr_compose_args="$compose_args_var"
+  local members_raw service member_paths output sandbox_id
+  local -a members=() client_args=() member_path=()
+  local smoke_path=apps/api/dist/apps/api/src/scripts/smoke-commercial-ocr-worker.js
+
+  members_raw="$(maxim_topology_ocr_services_for_compose "$compose_args_var")" || return 1
+  [[ -n "$members_raw" ]] || return 1
+  mapfile -t members <<<"$members_raw"
+  for service in "${members[@]}"; do
+    member_paths="$(maxim_topology_ocr_pool_member_paths "$service")" || return 1
+    mapfile -t member_path <<<"$member_paths"
+    local request_env=(
+      -e "COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH=${member_path[0]}/native-ocr.sock"
+      -e COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS=
+    )
+    if [[ "$client_mode" == prestart ]]; then
+      client_args=(run --rm --no-deps --pull never "${request_env[@]}"
+        --entrypoint node "$MAXIM_MEDIA_ANALYSIS_SERVICE" "$smoke_path")
+    else
+      client_args=(exec -T "${request_env[@]}" "$MAXIM_MEDIA_ANALYSIS_SERVICE" node "$smoke_path")
+    fi
+    if ! output="$(docker compose "${ocr_compose_args[@]}" "${client_args[@]}" 2>&1)" ||
+      ! grep -Fxq 'Commercial OCR worker smoke passed.' <<<"$output"; then
+      echo "Native OCR UDS raster smoke failed for $service." >&2
       [[ -z "$output" ]] || printf '%s\n' "$output" >&2
       return 1
-    }
-  elif ! output="$(
-    docker compose "${compose_args_ref[@]}" exec -T "$MAXIM_MEDIA_ANALYSIS_SERVICE" \
-      node apps/api/dist/apps/api/src/scripts/smoke-commercial-ocr-worker.js 2>&1
-  )"; then
-    echo "Pre-fence native OCR UDS raster smoke failed." >&2
-    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
-    return 1
-  fi
-  if ! grep -Fxq 'Commercial OCR worker smoke passed.' <<<"$output"; then
-    echo "Pre-fence native OCR UDS raster smoke returned an invalid marker." >&2
-    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
-    return 1
-  fi
-
-  sandbox_id="$(
-    docker compose "${compose_args_ref[@]}" ps --status running -q \
-      "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" 2>/dev/null
-  )" || return 1
-  if [[ -z "$sandbox_id" || "$sandbox_id" == *$'\n'* ]]; then
-    echo "Pre-fence native OCR UDS smoke lost the unique sandbox container." >&2
-    return 1
-  fi
-  if ! maxim_topology_wait_for_no_ocr_native_processes "$sandbox_id" 15; then
-    echo "Pre-fence native OCR UDS smoke left a Tesseract process behind." >&2
-    return 1
-  fi
-  maxim_topology_verify_ocr_native_sandbox_runtime \
-    "$compose_args_var" "$expected_image_id" "$runtime_media_policy"
+    fi
+    sandbox_id="$(docker compose "${ocr_compose_args[@]}" ps --status running -q "$service" 2>/dev/null)" || return 1
+    if [[ -z "$sandbox_id" || "$sandbox_id" == *$'\n'* ]] ||
+      ! maxim_topology_wait_for_no_ocr_native_processes "$sandbox_id" 15; then
+      echo "Could not prove Tesseract cleanup for $service." >&2
+      return 1
+    fi
+  done
 }
 
 maxim_topology_smoke_media_analysis_tesseract() {
@@ -2630,9 +2871,9 @@ maxim_topology_smoke_media_analysis_tesseract() {
       ;;
     sandbox)
       native_service="$MAXIM_OCR_NATIVE_SANDBOX_SERVICE"
-      maxim_topology_require_ocr_native_sandbox_config "$compose_args_var"
-      maxim_topology_wait_for_ocr_native_sandbox "$compose_args_var" 180
-      maxim_topology_verify_ocr_native_sandbox_runtime "$compose_args_var" '' with-media
+      maxim_topology_require_ocr_native_sandbox_config "$compose_args_var" || return 1
+      maxim_topology_wait_for_ocr_native_sandbox "$compose_args_var" 180 || return 1
+      maxim_topology_verify_ocr_native_sandbox_runtime "$compose_args_var" '' with-media || return 1
       ;;
     *)
       echo "Unknown native OCR boundary smoke policy: $native_boundary_policy" >&2
@@ -2640,21 +2881,25 @@ maxim_topology_smoke_media_analysis_tesseract() {
       ;;
   esac
 
+  local ocr_workers_expected=0
   if [[ "$native_boundary_policy" == "sandbox" ]]; then
-    if ! output="$(
-      docker compose "${compose_args_ref[@]}" exec -T "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" \
-        node apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js \
-        --probe 2>&1
-    )"; then
-      echo "Native OCR sandbox probe failed." >&2
-      [[ -z "$output" ]] || printf '%s\n' "$output" >&2
-      return 1
-    fi
-    if ! grep -Fxq 'Native OCR sandbox probe passed.' <<<"$output"; then
-      echo "Native OCR sandbox did not return its exact probe marker." >&2
-      [[ -z "$output" ]] || printf '%s\n' "$output" >&2
-      return 1
-    fi
+    local members_raw service
+    local members=()
+    members_raw="$(maxim_topology_ocr_services_for_compose "$compose_args_var")" || return 1
+    [[ -n "$members_raw" ]] || return 1
+    mapfile -t members <<<"$members_raw"
+    ocr_workers_expected="${#members[@]}"
+    for service in "${members[@]}"; do
+      if ! output="$(
+        docker compose "${compose_args_ref[@]}" exec -T "$service" \
+          node apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js \
+          --probe 2>&1
+      )" || ! grep -Fxq 'Native OCR sandbox probe passed.' <<<"$output"; then
+        echo "Native OCR sandbox probe failed for $service." >&2
+        [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+        return 1
+      fi
+    done
   else
     if ! binary="$(
       docker compose "${compose_args_ref[@]}" exec -T "$native_service" \
@@ -2720,7 +2965,7 @@ maxim_topology_smoke_media_analysis_tesseract() {
   for ((attempt = 1; attempt <= 30; attempt += 1)); do
     if docker compose "${compose_args_ref[@]}" exec -T "$MAXIM_MEDIA_ANALYSIS_SERVICE" \
       node -e \
-      'fetch("http://127.0.0.1:3001/api/health/ready", { signal: AbortSignal.timeout(3000) }).then(async (response) => { const body = await response.json(); const lag = body?.checks?.queueLag; const age = Date.now() - Date.parse(lag?.sampleGeneratedAt); const coldBacklog = process.argv[1] === "cold-recovery" && response.status === 503 && body?.ok === false && body?.checks?.database === true && body?.checks?.redis === true && body?.systemMode?.source === "auto" && body?.systemMode?.condition === "queue_backlog" && body?.systemMode?.manualMode === null && lag?.rawOk === false && Number.isFinite(lag?.effectiveLagSec) && lag.effectiveLagSec > 10 && Number.isFinite(age) && age >= -1000 && age <= 15000 && body?.checks?.ocr?.behaviorIdentity?.complete === true && body?.checks?.ocr?.behaviorIdentity?.verified === true; if ((!response.ok || body?.ok !== true) && !coldBacklog || body?.checks?.ocr?.ready !== true) process.exit(1); }).catch(() => process.exit(1));' "$readiness_policy" \
+      'fetch("http://127.0.0.1:3001/api/health/ready", { signal: AbortSignal.timeout(3000) }).then(async (response) => { const body = await response.json(); const count = Number(process.argv[2] ?? "0"); const workers = body?.checks?.ocr?.workers; if (count !== 0 && (workers?.configured !== count || workers?.ready !== count)) process.exit(1); const lag = body?.checks?.queueLag; const age = Date.now() - Date.parse(lag?.sampleGeneratedAt); const coldBacklog = process.argv[1] === "cold-recovery" && response.status === 503 && body?.ok === false && body?.checks?.database === true && body?.checks?.redis === true && body?.systemMode?.source === "auto" && body?.systemMode?.condition === "queue_backlog" && body?.systemMode?.manualMode === null && lag?.rawOk === false && Number.isFinite(lag?.effectiveLagSec) && lag.effectiveLagSec > 10 && Number.isFinite(age) && age >= -1000 && age <= 15000 && body?.checks?.ocr?.behaviorIdentity?.complete === true && body?.checks?.ocr?.behaviorIdentity?.verified === true; if ((!response.ok || body?.ok !== true) && !coldBacklog || body?.checks?.ocr?.ready !== true) process.exit(1); }).catch(() => process.exit(1));' "$readiness_policy" "$ocr_workers_expected" \
       >/dev/null 2>&1; then
       ready=1
       break
@@ -2730,6 +2975,13 @@ maxim_topology_smoke_media_analysis_tesseract() {
   if [[ "$ready" -ne 1 ]]; then
     echo "$MAXIM_MEDIA_ANALYSIS_SERVICE did not reach internal OCR readiness." >&2
     return 1
+  fi
+
+  if [[ "$native_boundary_policy" == "sandbox" ]]; then
+    maxim_topology_smoke_each_ocr_socket "$compose_args_var" running-media || return 1
+    maxim_topology_verify_ocr_native_sandbox_runtime "$compose_args_var" '' with-media || return 1
+    echo "No-network OCR sandbox, Tesseract rus+eng, UDS raster, reviewed rollout mode, and internal OCR readiness smokes passed."
+    return 0
   fi
 
   if ! output="$(
@@ -2746,24 +2998,7 @@ maxim_topology_smoke_media_analysis_tesseract() {
     return 1
   fi
 
-  if [[ "$native_boundary_policy" == "sandbox" ]]; then
-    local sandbox_container_id
-    sandbox_container_id="$(
-      docker compose "${compose_args_ref[@]}" ps --status running -q \
-        "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" 2>/dev/null
-    )" || return 1
-    if [[ -z "$sandbox_container_id" || "$sandbox_container_id" == *$'\n'* ]]; then
-      echo "Could not resolve the unique OCR sandbox after raster smoke." >&2
-      return 1
-    fi
-    if ! maxim_topology_wait_for_no_ocr_native_processes "$sandbox_container_id" 15; then
-      echo "OCR sandbox retained a Tesseract process after raster smoke." >&2
-      return 1
-    fi
-    echo "No-network OCR sandbox, Tesseract rus+eng, UDS raster, reviewed rollout mode, and internal OCR readiness smokes passed."
-  else
-    echo "Tesseract rus+eng, reviewed rollout mode, native worker raster, and internal OCR readiness smokes passed in $MAXIM_MEDIA_ANALYSIS_SERVICE."
-  fi
+  echo "Tesseract rus+eng, reviewed rollout mode, native worker raster, and internal OCR readiness smokes passed in $MAXIM_MEDIA_ANALYSIS_SERVICE."
 }
 
 maxim_topology_expand_api_services() {

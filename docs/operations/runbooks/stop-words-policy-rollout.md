@@ -50,6 +50,17 @@ An exact standalone PUT retry with saved revision `expectedRevision + 1` and ide
 
 OCR availability comes from a diagnostic Redis heartbeat published by `api-media-analysis` every five seconds with a 15-second TTL. It samples existing local readiness and native identity without OCR/MAX requests. HTTP remains loopback-only. Readers verify source, version, size, timestamp and remaining TTL; missing, malformed, stale or unreadable observations yield `unavailable`. The heartbeat never authorizes deletion or changes rollout mode. OCR stop-list actions remain delete-only.
 
+Image OCR requires agreement on the same rule across the primary and confirming passes. For typed
+`EXACT` words and phrases, the 90 percent minimum applies to the matched word spans, with word
+boundaries and URLs checked in the original OCR text. Legacy rules, `MASKED` rules and domains
+also require the existing page confidence. An image stop-list job may request one extra grayscale confirmation
+per album after a successful binary pass fails to confirm. It can crop the primary raster to the entire source word line
+when a confident exact candidate has validated geometry. The crop is bound to that rule and
+limited to 512,000 pixels. When geometry is missing and binary OCR reads no text, the extra
+pass can use the whole grayscale image. The extra reading uses different segmentation from
+the primary pass and requires at least 16 seconds on the original deadline. Delete proof v2 records span confidence for `EXACT` matches.
+The dispatcher also validates pending v1 proofs against the original settings fingerprint.
+
 ## Bounded Audit
 
 Use `./infra/scripts/vps-connect.sh postgres-audit moderation-outcomes [--bot <bot-id>]` sequentially. This reviewed collector checks its index and admits at most 513 recent indexed events, reporting 512 over a fixed 60-minute recorded-event window. It retains the existing statement/lock limits and audit grants. No message text, configured words/domains, identities or raw errors enter the report.

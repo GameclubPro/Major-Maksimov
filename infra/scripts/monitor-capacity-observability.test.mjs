@@ -68,6 +68,11 @@ const expectedApiImage = {
   sourceSha: apiImageSha,
 };
 const productionComposeSource = readFileSync(resolve(root, 'infra/docker-compose.yml'), 'utf8');
+const singletonComposeSource = productionComposeSource.replace(
+  /\n {2}ocr-native-sandbox-[23]:\n[\s\S]*?(?=\n {2}[a-z0-9-]+:)/gu,
+  '',
+);
+const expectedOcrPool = 'ocr-native-sandbox,ocr-native-sandbox-2,ocr-native-sandbox-3';
 const expectedAppRoleByService = Object.freeze({
   'api-ingress': 'ingress',
   'api-admin': 'admin',
@@ -128,6 +133,9 @@ function inspectedContainer(index, options = {}) {
 function inspectedSandbox(index, options = {}) {
   const project = Object.hasOwn(options, 'project') ? options.project : 'infra';
   const service = options.service ?? 'ocr-native-sandbox';
+  const lane = options.lane ?? null;
+  const dir = lane ? `/run/maxim-ocr-${lane}` : '/run/maxim-ocr';
+  const volumeSuffix = lane ? `ocr_native_ipc_${lane}` : 'ocr_native_ipc';
   const sandboxCommand = [
     'node',
     'apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js',
@@ -140,8 +148,8 @@ function inspectedSandbox(index, options = {}) {
     Mounts: options.mounts ?? [
       {
         Type: 'volume',
-        Name: `${project}_ocr_native_ipc`,
-        Destination: '/run/maxim-ocr',
+        Name: `${project}_${volumeSuffix}`,
+        Destination: dir,
         RW: true,
         Mode: 'rw',
       },
@@ -156,7 +164,7 @@ function inspectedSandbox(index, options = {}) {
       Cmd: options.command ?? sandboxCommand,
       Env: options.environment ?? [
         'NODE_ENV=production',
-        'COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH=/run/maxim-ocr/native-ocr.sock',
+        `COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH=${dir}/native-ocr.sock`,
         'PHOTO_DUPLICATE_MAX_BYTES=16777216',
         'COMMERCIAL_OCR_MAX_INPUT_PIXELS=40000000',
         'COMMERCIAL_OCR_MAX_OUTPUT_PIXELS=3000000',
@@ -182,6 +190,7 @@ function inspectedSandbox(index, options = {}) {
         'com.maxim.release-protected': 'true',
         'com.maxim.ocr-native-sandbox': 'true',
         'com.maxim.ocr-native-sandbox-capable': 'true',
+        ...(lane ? { 'com.maxim.ocr-native-sandbox-pool-capable': 'true' } : {}),
         ...(options.labels ?? {}),
       },
     },
@@ -524,7 +533,7 @@ function probeInspectedFleet(inspection, options = {}) {
       ok: true,
       output:
         command === 'git'
-          ? productionComposeSource
+          ? singletonComposeSource
           : args[0] === 'ps'
             ? inspection.map((container) => container.Id).join('\n')
             : JSON.stringify(inspection),
@@ -860,7 +869,7 @@ test('API fleet census checks runtime identity and exact-image roles without exp
     expectedImage: expectedApiImage,
     runBounded: async (command, args, options) => {
       calls.push([command, args, options]);
-      if (command === 'git') return { ok: true, output: productionComposeSource };
+      if (command === 'git') return { ok: true, output: singletonComposeSource };
       return args[0] === 'ps'
         ? { ok: true, output: `${ids.join('\n')}\n` }
         : { ok: true, output: JSON.stringify(inspection) };
@@ -1080,7 +1089,7 @@ test('fleet observation failures retain finite stages and causes without retryin
       runBounded: async (command, args) => {
         calls++;
         if (fixture.throws) throw new Error('private-exception-message');
-        if (command === 'git') return fixture.git ?? { ok: true, output: productionComposeSource };
+        if (command === 'git') return fixture.git ?? { ok: true, output: singletonComposeSource };
         return args[0] === 'ps'
           ? (fixture.list ?? { ok: true, output: ids })
           : (fixture.inspect ?? { ok: true, output: JSON.stringify(inspection) });
@@ -1794,7 +1803,7 @@ test('API fleet reads a release with independent Lastik while retaining manifest
     runBounded: async (command, args) => {
       if (command === 'git') {
         assert.deepEqual(args, ['show', `${apiImageSha}:infra/docker-compose.yml`]);
-        return { ok: true, output: productionComposeSource };
+        return { ok: true, output: singletonComposeSource };
       }
       return {
         ok: true,
@@ -1852,7 +1861,7 @@ test('API fleet fallback topology and release manifest identity stay exact', () 
     resolveExpectedApiTopologyFromCompose(DEFAULT_EXPECTED_API_SERVICES, productionComposeSource),
     {
       services: DEFAULT_EXPECTED_API_SERVICES,
-      expectedAuxiliaryService: 'ocr-native-sandbox,photo-native-sandbox',
+      expectedAuxiliaryService: `${expectedOcrPool},photo-native-sandbox`,
     },
   );
   assert.deepEqual(
@@ -2845,4 +2854,32 @@ test('photo and OCR auxiliaries are independently attested without changing the 
     );
   }
   assert.ok(summarize([photo, { ...photo, Id: 'e'.repeat(64) }]).unexpectedApiContainerCount >= 2);
+});
+
+test('API fleet independently attests all three OCR members and sums their restart counters', () => {
+  const roles = DEFAULT_EXPECTED_API_SERVICES.map((_, index) => inspectedContainer(index));
+  const primary = inspectedSandbox(80, { restartCount: 1 });
+  const second = inspectedSandbox(81, {
+    service: 'ocr-native-sandbox-2',
+    lane: 2,
+    restartCount: 2,
+  });
+  const third = inspectedSandbox(82, { service: 'ocr-native-sandbox-3', lane: 3, restartCount: 3 });
+  const summarize = (members) =>
+    summarizeApiFleet(
+      DEFAULT_EXPECTED_API_SERVICES,
+      expectedApiImage,
+      parseApiFleetInspection(JSON.stringify([...roles, ...members])),
+      expectedOcrPool,
+      { observedAt: '2026-11-21T15:30:00Z' },
+    );
+  const complete = summarize([primary, second, third]);
+  assert.equal(complete.unexpectedApiContainerCount, 0);
+  assert.equal(complete.totalRestartCount, 6);
+  assert.equal(complete.restartEvidence.ocr.total, 6);
+  assert.equal(summarize([primary, second]).unexpectedApiContainerCount, 1);
+  third.Mounts = second.Mounts;
+  const sharedVolume = summarize([primary, second, third]);
+  assert.equal(sharedVolume.unexpectedMainContainerCount, 1);
+  assert.equal(sharedVolume.restartEvidence.ocr.total, null);
 });

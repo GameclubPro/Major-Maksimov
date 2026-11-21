@@ -280,6 +280,40 @@ describe('CommercialOcrMetricsService', () => {
     });
   });
 
+  it('puts production producer and media counters in the same behavior scope', async () => {
+    const common = { NODE_ENV: 'production', APP_ROLE: 'moderation' };
+    const producer = new TestCommercialOcrMetricsService(
+      new ConfigService({
+        ...common,
+        APP_SERVICE_NAME: 'api-moderation-realtime-b',
+        COMMERCIAL_OCR_TESSERACT_MAX_QUEUE: 16,
+      }),
+    );
+    const media = new TestCommercialOcrMetricsService(
+      new ConfigService({
+        ...common,
+        APP_SERVICE_NAME: 'api-media-analysis',
+        COMMERCIAL_OCR_TESSERACT_MAX_QUEUE: 4,
+      }),
+    );
+    const changedMedia = new TestCommercialOcrMetricsService(
+      new ConfigService({
+        ...common,
+        APP_SERVICE_NAME: 'api-media-analysis',
+        COMMERCIAL_OCR_TESSERACT_MAX_QUEUE: 2,
+      }),
+    );
+
+    const [producerSnapshot, mediaSnapshot, changedMediaSnapshot] = await Promise.all(
+      [producer, media, changedMedia].map((service) => service.getSnapshot()),
+    );
+
+    expect(producerSnapshot.behaviorRelease).toEqual(mediaSnapshot.behaviorRelease);
+    expect(changedMediaSnapshot.behaviorRelease.scope).not.toBe(
+      mediaSnapshot.behaviorRelease.scope,
+    );
+  });
+
   it('retries an ambiguous Redis batch with the same idempotency fence', async () => {
     const appliedBatches = new Set<string>();
     let remoteDeleteCount = 0;

@@ -591,6 +591,12 @@ if ! MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" \
   select_runtime_rollback_recovery_base
 fi
 ensure_compose_env
+# FLAG: Ref rollback can replace its controller. An immutable legacy image rollback
+# retains a controller that can attest the pool and prove removal of its extra lanes.
+if ! maxim_topology_require_ocr_pool_source_parity "$TARGET_FULL_SHA" COMPOSE_FILES; then
+  echo 'Use rollback-release to return to a compatible single-worker OCR image.' >&2
+  exit 1
+fi
 refuse_conflicting_scale_stack
 ensure_stateful_services_ready
 PRESERVED_COMPOSE_FILE="$(mktemp "$ROOT_DIR/infra/.runtime-rollback-compose.XXXXXX.yml")"

@@ -1,5 +1,6 @@
 import { Injectable, type OnModuleDestroy } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import type { CommercialOcrBoundingBox } from './native-tesseract-ocr.types';
 import { validateCommercialOcrVersion } from './commercial-ocr.queue';
 
 export const COMMERCIAL_OCR_CACHE_SCHEMA_VERSION = 2 as const;
@@ -16,6 +17,7 @@ export type CommercialOcrCacheValue = Readonly<{
   text: string;
   confidencePermille: number;
   words: readonly CommercialOcrCachedWord[];
+  rasterSize?: Readonly<{ width: number; height: number }>;
 }>;
 
 export type CommercialOcrCachedWord = Readonly<{
@@ -23,6 +25,7 @@ export type CommercialOcrCachedWord = Readonly<{
   start: number;
   end: number;
   confidencePermille: number;
+  boundingBox?: CommercialOcrBoundingBox;
 }>;
 
 export type CommercialOcrCacheIdentity = Readonly<{
@@ -242,9 +245,10 @@ export function validateCommercialOcrCacheValue(
   if (!Array.isArray(value.words) || value.words.length > MAX_WORDS) {
     throw new Error('Commercial OCR cache words are invalid');
   }
+  const rasterSize = readRasterSize(value.rasterSize);
   let previousEnd = 0;
   const words = value.words.map((word) => {
-    const normalizedWord = validateWord(word, value.text);
+    const normalizedWord = validateWord(word, value.text, rasterSize);
     if (normalizedWord.start < previousEnd) {
       throw new Error('Commercial OCR cache word ordering is invalid');
     }
@@ -254,10 +258,34 @@ export function validateCommercialOcrCacheValue(
   if (value.status === 'no_text' ? words.length !== 0 : words.length === 0) {
     throw new Error('Commercial OCR cache words do not match its status');
   }
-  return Object.freeze({ ...value, words: Object.freeze(words) });
+  return Object.freeze({
+    ...value,
+    words: Object.freeze(words),
+    ...(rasterSize ? { rasterSize } : {}),
+  });
 }
 
-function validateWord(word: CommercialOcrCachedWord, text: string): CommercialOcrCachedWord {
+function readRasterSize(value: CommercialOcrCacheValue['rasterSize']) {
+  if (value === undefined) return undefined;
+  if (
+    value &&
+    Number.isSafeInteger(value.width) &&
+    Number.isSafeInteger(value.height) &&
+    value.width > 0 &&
+    value.height > 0 &&
+    value.width <= 4_000 &&
+    value.height <= 4_000
+  ) {
+    return Object.freeze({ width: value.width, height: value.height });
+  }
+  throw new Error('Commercial OCR cache raster size is invalid');
+}
+
+function validateWord(
+  word: CommercialOcrCachedWord,
+  text: string,
+  rasterSize: CommercialOcrCacheValue['rasterSize'],
+): CommercialOcrCachedWord {
   if (
     !word ||
     typeof word.text !== 'string' ||
@@ -275,7 +303,26 @@ function validateWord(word: CommercialOcrCachedWord, text: string): CommercialOc
   ) {
     throw new Error('Commercial OCR cache word is invalid');
   }
-  return Object.freeze({ ...word });
+  const { boundingBox, ...basic } = word;
+  const validBox =
+    boundingBox &&
+    rasterSize &&
+    Number.isSafeInteger(boundingBox.left) &&
+    boundingBox.left >= 0 &&
+    Number.isSafeInteger(boundingBox.top) &&
+    boundingBox.top >= 0 &&
+    Number.isSafeInteger(boundingBox.width) &&
+    boundingBox.width > 0 &&
+    Number.isSafeInteger(boundingBox.height) &&
+    boundingBox.height > 0 &&
+    boundingBox.left + boundingBox.width <= rasterSize.width &&
+    boundingBox.top + boundingBox.height <= rasterSize.height;
+  // Geometry is optional evidence for the crop optimization. Invalid geometry cannot
+  // start a crop and does not suppress otherwise well-formed full-page text.
+  return Object.freeze({
+    ...basic,
+    ...(validBox ? { boundingBox: Object.freeze({ ...boundingBox }) } : {}),
+  });
 }
 
 function validateCacheTtl(value: number): number {

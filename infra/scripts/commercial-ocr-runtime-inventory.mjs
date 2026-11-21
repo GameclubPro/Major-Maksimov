@@ -5,7 +5,12 @@ import { pathToFileURL } from 'node:url';
 import { isReviewedPhotoNativeSandboxRuntime } from './photo-native-runtime-boundary.cjs';
 
 const MAX_INSPECT_BYTES = 16 * 1024 * 1024;
-const OCR_NATIVE_SANDBOX_SERVICE = 'ocr-native-sandbox';
+const OCR_NATIVE_SANDBOX_SERVICES = Object.freeze([
+  'ocr-native-sandbox',
+  'ocr-native-sandbox-2',
+  'ocr-native-sandbox-3',
+]);
+const OCR_NATIVE_SANDBOX_SERVICE = OCR_NATIVE_SANDBOX_SERVICES[0];
 const PHOTO_NATIVE_SANDBOX_SERVICE = 'photo-native-sandbox';
 const OCR_NATIVE_SANDBOX_COMMAND = Object.freeze([
   'node',
@@ -82,8 +87,11 @@ export function classifyCommercialOcrApiContainerInventory(
   const expectedAuxiliaries = new Set(expectedAuxiliaryService?.split(',') ?? []);
   if (
     expectedAuxiliaries.size !== (expectedAuxiliaryService?.split(',').length ?? 0) ||
+    (OCR_NATIVE_SANDBOX_SERVICES.slice(1).some((service) => expectedAuxiliaries.has(service)) &&
+      !OCR_NATIVE_SANDBOX_SERVICES.every((service) => expectedAuxiliaries.has(service))) ||
     [...expectedAuxiliaries].some(
-      (service) => ![OCR_NATIVE_SANDBOX_SERVICE, PHOTO_NATIVE_SANDBOX_SERVICE].includes(service),
+      (service) =>
+        ![...OCR_NATIVE_SANDBOX_SERVICES, PHOTO_NATIVE_SANDBOX_SERVICE].includes(service),
     )
   ) {
     throw new Error('Commercial OCR inventory expected auxiliary service is invalid.');
@@ -111,8 +119,10 @@ export function classifyCommercialOcrApiContainerInventory(
       const apiLikeService = isApiLikeService(composeService);
       const ocrNativeSandboxSignal =
         ocrNativeSandbox ||
-        composeService === OCR_NATIVE_SANDBOX_SERVICE ||
-        isExpectedComposeServiceContainerName(name, expectedProject, OCR_NATIVE_SANDBOX_SERVICE) ||
+        OCR_NATIVE_SANDBOX_SERVICES.includes(composeService) ||
+        OCR_NATIVE_SANDBOX_SERVICES.some((service) =>
+          isExpectedComposeServiceContainerName(name, expectedProject, service),
+        ) ||
         hasExactStringArray(container?.Config?.Cmd, OCR_NATIVE_SANDBOX_COMMAND);
       const photoNativeSandboxSignal =
         labels['com.maxim.photo-native-sandbox'] === 'true' ||
@@ -159,7 +169,9 @@ export function classifyCommercialOcrApiContainerInventory(
         auxiliaryCandidate: ocrNativeSandboxSignal || photoNativeSandboxSignal,
         auxiliaryService: photoNativeSandboxSignal
           ? PHOTO_NATIVE_SANDBOX_SERVICE
-          : OCR_NATIVE_SANDBOX_SERVICE,
+          : OCR_NATIVE_SANDBOX_SERVICES.includes(composeService)
+            ? composeService
+            : OCR_NATIVE_SANDBOX_SERVICE,
         reviewedAuxiliary:
           (expectedAuxiliaries.has(PHOTO_NATIVE_SANDBOX_SERVICE) &&
             photoNativeSandboxSignal &&
@@ -173,24 +185,22 @@ export function classifyCommercialOcrApiContainerInventory(
               PHOTO_NATIVE_SANDBOX_SERVICE,
             ) &&
             isReviewedPhotoNativeSandboxRuntime(container, expectedProject, expectedImageId)) ||
-          (expectedAuxiliaries.has(OCR_NATIVE_SANDBOX_SERVICE) &&
+          (expectedAuxiliaries.has(composeService) &&
             !photoNativeSandboxSignal &&
             project === expectedProject &&
-            composeService === OCR_NATIVE_SANDBOX_SERVICE &&
+            OCR_NATIVE_SANDBOX_SERVICES.includes(composeService) &&
             name !== null &&
-            isExpectedComposeServiceContainerName(
-              name,
-              expectedProject,
-              OCR_NATIVE_SANDBOX_SERVICE,
-            ) &&
+            isExpectedComposeServiceContainerName(name, expectedProject, composeService) &&
             imageIsReviewed &&
             releaseProtected &&
             ocrNativeSandbox &&
             ocrNativeSandboxCapable &&
+            (composeService === OCR_NATIVE_SANDBOX_SERVICE ||
+              labels['com.maxim.ocr-native-sandbox-pool-capable'] === 'true') &&
             appService === null &&
             appRole === null &&
             ocrVersion === null &&
-            isReviewedOcrNativeSandboxRuntime(container, expectedProject)),
+            isReviewedOcrNativeSandboxRuntime(container, expectedProject, composeService)),
       };
     })
     .filter((container) => container.candidate);
@@ -249,7 +259,10 @@ export function classifyCommercialOcrApiContainerInventory(
   });
 }
 
-function isReviewedOcrNativeSandboxRuntime(container, expectedProject) {
+function isReviewedOcrNativeSandboxRuntime(container, expectedProject, service) {
+  const suffix = service === OCR_NATIVE_SANDBOX_SERVICE ? '' : service.slice(-1);
+  const directory = suffix ? `/run/maxim-ocr-${suffix}` : '/run/maxim-ocr';
+  const volumeSuffix = suffix ? `ocr_native_ipc_${suffix}` : 'ocr_native_ipc';
   const config = container?.Config ?? {};
   const state = container?.State ?? {};
   const hostConfig = container?.HostConfig ?? {};
@@ -259,7 +272,7 @@ function isReviewedOcrNativeSandboxRuntime(container, expectedProject) {
     state?.Health?.Status === 'healthy' &&
     config.User === '1000:1000' &&
     hasExactStringArray(config.Cmd, OCR_NATIVE_SANDBOX_COMMAND) &&
-    isExactOcrNativeSandboxEnvironment(config.Env) &&
+    isExactOcrNativeSandboxEnvironment(config.Env, directory) &&
     hostConfig.NetworkMode === 'none' &&
     hostConfig.ReadonlyRootfs === true &&
     hostConfig.Init === true &&
@@ -269,11 +282,11 @@ function isReviewedOcrNativeSandboxRuntime(container, expectedProject) {
     hasExactStringArray(hostConfig.CapDrop, ['ALL']) &&
     hasExactStringArray(hostConfig.SecurityOpt, ['no-new-privileges:true']) &&
     hasExactSandboxTmpfs(hostConfig.Tmpfs) &&
-    hasExactSandboxMount(container?.Mounts, expectedProject)
+    hasExactSandboxMount(container?.Mounts, expectedProject, directory, volumeSuffix)
   );
 }
 
-function isExactOcrNativeSandboxEnvironment(value) {
+function isExactOcrNativeSandboxEnvironment(value, directory) {
   if (!Array.isArray(value)) return false;
   const environment = new Map();
   for (const entry of value) {
@@ -290,7 +303,11 @@ function isExactOcrNativeSandboxEnvironment(value) {
     }
     environment.set(key, entry.slice(separator + 1));
   }
-  return Object.entries(OCR_NATIVE_SANDBOX_REQUIRED_ENV).every(
+  const expected = {
+    ...OCR_NATIVE_SANDBOX_REQUIRED_ENV,
+    COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: `${directory}/native-ocr.sock`,
+  };
+  return Object.entries(expected).every(
     ([key, expectedValue]) => environment.get(key) === expectedValue,
   );
 }
@@ -324,15 +341,15 @@ function hasExactSandboxTmpfs(value) {
   );
 }
 
-function hasExactSandboxMount(value, expectedProject) {
+function hasExactSandboxMount(value, expectedProject, directory, volumeSuffix) {
   if (!Array.isArray(value) || value.length !== 1) return false;
   const mount = value[0];
   return (
     mount !== null &&
     typeof mount === 'object' &&
     mount.Type === 'volume' &&
-    mount.Name === `${expectedProject}_ocr_native_ipc` &&
-    mount.Destination === '/run/maxim-ocr' &&
+    mount.Name === `${expectedProject}_${volumeSuffix}` &&
+    mount.Destination === directory &&
     mount.RW === true &&
     mount.Mode === 'rw'
   );
@@ -372,7 +389,7 @@ function isExpectedProjectApiContainerName(value, expectedProject, expectedServi
   if (typeof value !== 'string') return false;
   const candidates = [
     'api',
-    OCR_NATIVE_SANDBOX_SERVICE,
+    ...OCR_NATIVE_SANDBOX_SERVICES,
     PHOTO_NATIVE_SANDBOX_SERVICE,
     ...expectedServices,
   ];

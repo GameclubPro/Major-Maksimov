@@ -68,7 +68,12 @@ const HISTORICALLY_OPTIONAL_API_SERVICES = new Set([
   'api-publisher',
   'api-message-retention',
 ]);
-const OCR_NATIVE_SANDBOX_SERVICE = 'ocr-native-sandbox';
+const OCR_NATIVE_SANDBOX_SERVICES = Object.freeze([
+  'ocr-native-sandbox',
+  'ocr-native-sandbox-2',
+  'ocr-native-sandbox-3',
+]);
+const OCR_NATIVE_SANDBOX_SERVICE = OCR_NATIVE_SANDBOX_SERVICES[0];
 const PHOTO_NATIVE_SANDBOX_SERVICE = 'photo-native-sandbox';
 const OCR_NATIVE_SANDBOX_COMMAND = Object.freeze([
   'node',
@@ -580,11 +585,17 @@ function resolveExpectedApiTopologyFromCompose(expectedServices, composeSource) 
       throw new Error('API source Compose topology is missing a required role.');
     }
   }
-  const auxiliaryCount = serviceCounts.get(OCR_NATIVE_SANDBOX_SERVICE) ?? 0;
-  if (auxiliaryCount > 1) {
+  const ocrServices = OCR_NATIVE_SANDBOX_SERVICES.filter(
+    (service) => serviceCounts.get(service) === 1,
+  );
+  if (
+    OCR_NATIVE_SANDBOX_SERVICES.some((service) => (serviceCounts.get(service) ?? 0) > 1) ||
+    (ocrServices.length !== 0 && ocrServices[0] !== OCR_NATIVE_SANDBOX_SERVICE) ||
+    ocrServices.length === 2
+  ) {
     throw new Error('API source Compose auxiliary topology is ambiguous.');
   }
-  if (auxiliaryCount === 1 && !present.includes('api-media-analysis')) {
+  if (ocrServices.length > 0 && !present.includes('api-media-analysis')) {
     throw new Error('API source Compose auxiliary topology is missing its media role.');
   }
   const photoCount = serviceCounts.get(PHOTO_NATIVE_SANDBOX_SERVICE) ?? 0;
@@ -596,10 +607,7 @@ function resolveExpectedApiTopologyFromCompose(expectedServices, composeSource) 
   return {
     services: normalizeExpectedApiServices(present),
     expectedAuxiliaryService:
-      [
-        auxiliaryCount === 1 ? OCR_NATIVE_SANDBOX_SERVICE : null,
-        photoCount === 1 ? PHOTO_NATIVE_SANDBOX_SERVICE : null,
-      ]
+      [...ocrServices, photoCount === 1 ? PHOTO_NATIVE_SANDBOX_SERVICE : null]
         .filter(Boolean)
         .join(',') || null,
   };
@@ -658,7 +666,7 @@ function parseApiIdentityEnvironment(raw) {
   };
 }
 
-function isExactOcrNativeSandboxEnvironment(value) {
+function isExactOcrNativeSandboxEnvironment(value, directory) {
   if (!Array.isArray(value)) return false;
   const environment = new Map();
   for (const entry of value) {
@@ -675,7 +683,11 @@ function isExactOcrNativeSandboxEnvironment(value) {
     }
     environment.set(key, entry.slice(separator + 1));
   }
-  return Object.entries(OCR_NATIVE_SANDBOX_REQUIRED_ENV).every(
+  const expected = {
+    ...OCR_NATIVE_SANDBOX_REQUIRED_ENV,
+    COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: `${directory}/native-ocr.sock`,
+  };
+  return Object.entries(expected).every(
     ([key, expectedValue]) => environment.get(key) === expectedValue,
   );
 }
@@ -717,14 +729,14 @@ function hasExactSandboxTmpfs(value) {
   );
 }
 
-function hasExactSandboxMount(value, expectedProject) {
+function hasExactSandboxMount(value, expectedProject, directory, volumeSuffix) {
   if (!Array.isArray(value) || value.length !== 1) return false;
   const mount = value[0];
   return (
     isRecord(mount) &&
     mount.Type === 'volume' &&
-    mount.Name === `${expectedProject}_ocr_native_ipc` &&
-    mount.Destination === '/run/maxim-ocr' &&
+    mount.Name === `${expectedProject}_${volumeSuffix}` &&
+    mount.Destination === directory &&
     mount.RW === true &&
     mount.Mode === 'rw'
   );
@@ -775,10 +787,14 @@ function parseApiFleetInspection(raw) {
       throw new Error('Docker returned invalid API fleet health metadata.');
     }
     const project = readOptionalDockerToken(labels['com.docker.compose.project']);
+    const service = readOptionalDockerToken(labels['com.docker.compose.service']);
+    const lane = OCR_NATIVE_SANDBOX_SERVICES.slice(1).includes(service) ? service.slice(-1) : '';
+    const directory = lane ? `/run/maxim-ocr-${lane}` : '/run/maxim-ocr';
+    const volumeSuffix = lane ? `ocr_native_ipc_${lane}` : 'ocr_native_ipc';
     return {
       id,
       project,
-      service: readOptionalDockerToken(labels['com.docker.compose.service']),
+      service,
       name,
       imageId,
       imageRef,
@@ -797,9 +813,10 @@ function parseApiFleetInspection(raw) {
       ),
 
       ocrNativeSandboxCapable: labels['com.maxim.ocr-native-sandbox-capable'] === 'true',
+      ocrPoolCapable: labels['com.maxim.ocr-native-sandbox-pool-capable'] === 'true',
       healthStatus,
       sandboxCommandExact: hasExactStringArray(config.Cmd, OCR_NATIVE_SANDBOX_COMMAND),
-      sandboxEnvironmentExact: isExactOcrNativeSandboxEnvironment(config.Env),
+      sandboxEnvironmentExact: isExactOcrNativeSandboxEnvironment(config.Env, directory),
       sandboxUserExact: config.User === '1000:1000',
       sandboxNetworkNone: container?.HostConfig?.NetworkMode === 'none',
       sandboxReadOnly: container?.HostConfig?.ReadonlyRootfs === true,
@@ -813,8 +830,18 @@ function parseApiFleetInspection(raw) {
         'no-new-privileges:true',
       ]),
       sandboxTmpfsExact: hasExactSandboxTmpfs(container?.HostConfig?.Tmpfs),
-      sandboxMainMountExact: hasExactSandboxMount(container?.Mounts, 'infra'),
-      sandboxScaleMountExact: hasExactSandboxMount(container?.Mounts, 'infra-scale'),
+      sandboxMainMountExact: hasExactSandboxMount(
+        container?.Mounts,
+        'infra',
+        directory,
+        volumeSuffix,
+      ),
+      sandboxScaleMountExact: hasExactSandboxMount(
+        container?.Mounts,
+        'infra-scale',
+        directory,
+        volumeSuffix,
+      ),
       ...identity,
     };
   });
@@ -843,9 +870,11 @@ function isExpectedProjectApiContainerName(value) {
 function isOcrNativeSandboxCandidate(container) {
   return (
     container.ocrNativeSandbox === true ||
-    container.service === OCR_NATIVE_SANDBOX_SERVICE ||
-    isExpectedComposeServiceContainerName(container.name, OCR_NATIVE_SANDBOX_SERVICE) ||
-    /^\/infra-scale(?:-|_)ocr-native-sandbox(?:-|_)[1-9]\d*$/u.test(container.name) ||
+    OCR_NATIVE_SANDBOX_SERVICES.includes(container.service) ||
+    OCR_NATIVE_SANDBOX_SERVICES.some((service) =>
+      isExpectedComposeServiceContainerName(container.name, service),
+    ) ||
+    /^\/infra-scale(?:-|_)ocr-native-sandbox(?:-[23])?(?:-|_)[1-9]\d*$/u.test(container.name) ||
     container.sandboxCommandExact === true
   );
 }
@@ -862,8 +891,8 @@ function isPhotoNativeSandboxCandidate(container) {
 function isReviewedOcrNativeSandbox(container, expectedImage, expectedProject) {
   return (
     container.project === expectedProject &&
-    container.service === OCR_NATIVE_SANDBOX_SERVICE &&
-    isExpectedComposeServiceContainerName(container.name, OCR_NATIVE_SANDBOX_SERVICE) &&
+    OCR_NATIVE_SANDBOX_SERVICES.includes(container.service) &&
+    isExpectedComposeServiceContainerName(container.name, container.service) &&
     container.running === true &&
     container.status === 'running' &&
     container.healthStatus === 'healthy' &&
@@ -873,6 +902,7 @@ function isReviewedOcrNativeSandbox(container, expectedImage, expectedProject) {
     container.ocrNativeSandbox === true &&
     container.photoNativeSandbox !== true &&
     container.ocrNativeSandboxCapable === true &&
+    (container.service === OCR_NATIVE_SANDBOX_SERVICE || container.ocrPoolCapable === true) &&
     container.identityInvalid === false &&
     container.appRole === null &&
     container.appServiceName === null &&
@@ -931,7 +961,7 @@ function isApiFleetCandidate(container, expectedImage) {
 function validRestartEntries(entries, name) {
   return (
     Array.isArray(entries) &&
-    entries.length <= (name === 'api' ? 14 : 1) &&
+    entries.length <= (name === 'api' ? 14 : name === 'ocr' ? 3 : 1) &&
     entries.every(
       (entry) =>
         isRecord(entry) &&
@@ -1051,8 +1081,11 @@ function summarizeApiFleet(
   const expectedAuxiliaries = new Set(expectedAuxiliaryService?.split(',') ?? []);
   if (
     expectedAuxiliaries.size !== (expectedAuxiliaryService?.split(',').length ?? 0) ||
+    (OCR_NATIVE_SANDBOX_SERVICES.slice(1).some((service) => expectedAuxiliaries.has(service)) &&
+      !OCR_NATIVE_SANDBOX_SERVICES.every((service) => expectedAuxiliaries.has(service))) ||
     [...expectedAuxiliaries].some(
-      (service) => ![OCR_NATIVE_SANDBOX_SERVICE, PHOTO_NATIVE_SANDBOX_SERVICE].includes(service),
+      (service) =>
+        ![...OCR_NATIVE_SANDBOX_SERVICES, PHOTO_NATIVE_SANDBOX_SERVICE].includes(service),
     )
   ) {
     throw new Error('Expected API auxiliary topology is invalid.');
@@ -1093,35 +1126,44 @@ function summarizeApiFleet(
 
   const unexpectedOrdinaryApiContainerCount = unexpectedApiContainerCount;
   let acceptedAuxiliaryRestartCount = 0;
-  let ocrEntries = expectedAuxiliaries.has(OCR_NATIVE_SANDBOX_SERVICE) ? null : [];
+  const expectedOcrMembers = OCR_NATIVE_SANDBOX_SERVICES.filter((service) =>
+    expectedAuxiliaries.has(service),
+  );
+  let ocrEntries = [];
   let photoEntries = expectedAuxiliaries.has(PHOTO_NATIVE_SANDBOX_SERVICE) ? null : [];
-  if (
-    expectedAuxiliaries.has(OCR_NATIVE_SANDBOX_SERVICE) &&
-    auxiliaryContainers.length === 1 &&
-    isReviewedOcrNativeSandbox(auxiliaryContainers[0], expectedImage, 'infra')
-  ) {
-    acceptedAuxiliaryRestartCount = auxiliaryContainers[0].restartCount;
-    ocrEntries = [
-      { key: 'ocr', id: auxiliaryContainers[0].id, count: auxiliaryContainers[0].restartCount },
-    ];
-  } else if (
-    auxiliaryContainers.length === 0 &&
-    expectedAuxiliaries.has(OCR_NATIVE_SANDBOX_SERVICE)
-  ) {
-    unexpectedApiContainerCount += 1;
-    unexpectedMainContainerCount += 1;
-  } else {
-    if (auxiliaryContainers.length) ocrEntries = null;
-    for (const container of auxiliaryContainers) {
+  const acceptedOcrContainers = new Set();
+  for (const service of expectedOcrMembers) {
+    const matches = auxiliaryContainers.filter(
+      (container) =>
+        (OCR_NATIVE_SANDBOX_SERVICES.includes(container.service)
+          ? container.service
+          : OCR_NATIVE_SANDBOX_SERVICE) === service,
+    );
+    if (matches.length === 1 && isReviewedOcrNativeSandbox(matches[0], expectedImage, 'infra')) {
+      const container = matches[0];
+      acceptedOcrContainers.add(container.id);
+      acceptedAuxiliaryRestartCount += container.restartCount;
+      ocrEntries.push({
+        key: service === OCR_NATIVE_SANDBOX_SERVICE ? 'ocr' : `ocr-${service.slice(-1)}`,
+        id: container.id,
+        count: container.restartCount,
+      });
+    } else if (matches.length === 0) {
       unexpectedApiContainerCount += 1;
-      if (container.project === 'infra') {
-        unexpectedMainContainerCount += 1;
-      } else if (container.project === 'infra-scale') {
-        unexpectedScaleContainerCount += 1;
-      } else {
-        unexpectedManualContainerCount += 1;
-      }
+      unexpectedMainContainerCount += 1;
     }
+  }
+  const unreviewedOcrContainers = auxiliaryContainers.filter(
+    (container) => !acceptedOcrContainers.has(container.id),
+  );
+  if (ocrEntries.length !== expectedOcrMembers.length || unreviewedOcrContainers.length) {
+    ocrEntries = null;
+  }
+  for (const container of unreviewedOcrContainers) {
+    unexpectedApiContainerCount += 1;
+    if (container.project === 'infra') unexpectedMainContainerCount += 1;
+    else if (container.project === 'infra-scale') unexpectedScaleContainerCount += 1;
+    else unexpectedManualContainerCount += 1;
   }
 
   if (

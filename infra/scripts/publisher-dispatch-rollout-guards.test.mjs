@@ -197,7 +197,7 @@ test('serializes through the shared deploy lock and fences the exact active 14-r
   assert.match(rollout, /commercial-ocr-runtime-inventory\.mjs/u);
   assert.match(rollout, /maxim_topology_verify_ocr_native_sandbox_runtime/u);
   assert.match(rollout, /reviewedAuxiliaryCount === value\.expectedAuxiliaryCount/u);
-  assert.match(rollout, /MAXIM_OCR_NATIVE_SANDBOX_SERVICE/u);
+  assert.match(rollout, /maxim_topology_ocr_services_for_compose/u);
   for (const service of productionServices) {
     assert.match(rollout, new RegExp(`"${service}"`, 'u'));
   }

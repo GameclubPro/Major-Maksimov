@@ -660,6 +660,11 @@ jobs:
             '{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.PidsLimit}}|{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}|{{.Config.User}}|{{index .Config.Labels "com.maxim.ocr-native-sandbox"}}|{{index .Config.Labels "com.maxim.ocr-native-sandbox-capable"}}' \
             "$sandbox_name" | grep -Fx 'none|true|128|1073741824|1000000000|1000:1000|true|true'
           docker top "$sandbox_name" -eo pid,comm | awk 'NR > 1 && $2 == "tesseract" { found=1 } END { exit found ? 1 : 0 }'
+      - name: Verify three OCR workers and isolated recovery in API image
+        if: matrix.component == 'api'
+        env:
+          IMAGE_REF: ${{ matrix.image_repository }}:${{ github.sha }}
+        run: bash infra/scripts/smoke-ocr-pool-ci.sh "$IMAGE_REF"
       - name: Verify photo native isolation and fault recovery in API image
         if: matrix.component == 'api'
         env:

@@ -595,6 +595,28 @@ describe('CommercialOcrModerationService', () => {
     },
   );
 
+  it('classifies a missing or inaccessible original without claiming absence or creating an intent', async () => {
+    const harness = buildHarness({
+      exactError: Object.assign(new Error('private response'), { response: { status: 404 } }),
+    });
+    await expect(
+      harness.service.processCommercialOcrJob(job(), jobId, activeDeadlineAtMs),
+    ).resolves.toMatchObject({
+      kind: 'completed',
+      terminal: { outcome: 'TECHNICAL_INCOMPLETE', reason: 'source_unavailable' },
+    });
+
+    expect(harness.metrics.recordCounter).toHaveBeenCalledWith(
+      'source.exact.failure.initial.access_or_missing',
+    );
+    expect(harness.metrics.recordCounter).not.toHaveBeenCalledWith('source.exact.absent');
+    expect(harness.metrics.recordCounter).not.toHaveBeenCalledWith('source.exact.retry');
+    expect(harness.analysisService.analyzeAlbum).not.toHaveBeenCalled();
+    expect(
+      harness.moderationDeleteIntents.ensureIntentWithMessageActionClaim,
+    ).not.toHaveBeenCalled();
+  });
+
   it('does not analyze a pending commercial-only job after OCR is switched off', async () => {
     const harness = buildHarness({ mode: 'off' });
     await expect(

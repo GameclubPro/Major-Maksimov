@@ -1,19 +1,20 @@
-import { Injectable, type OnModuleDestroy } from '@nestjs/common';
+import { Injectable, type OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import {
-  NativeOcrSandboxClient,
   NativeOcrSandboxImageRejectedError,
   NativeOcrSandboxRequestError,
   NativeOcrSandboxRequestTimeoutError,
   NativeOcrSandboxUnavailableError,
 } from './native-ocr-sandbox.client';
+import { NativeOcrSandboxPool } from './native-ocr-sandbox.pool';
 import {
   COMMERCIAL_OCR_SHARP_PROCESSING_TIMEOUT_SECONDS,
   CommercialOcrImageRejectedError,
   resolveCommercialOcrPreprocessLimits,
   type CommercialOcrPassName,
   type CommercialOcrPreparedImage,
+  type CommercialOcrPreprocessOptions,
 } from './commercial-ocr-preprocess-config';
 import { NATIVE_OCR_SANDBOX_IPC_GRACE_MS } from './native-ocr-sandbox.protocol';
 
@@ -29,6 +30,7 @@ export {
   resolveCommercialOcrPreprocessLimits,
   type CommercialOcrPassName,
   type CommercialOcrPreparedImage,
+  type CommercialOcrPreprocessOptions,
   type CommercialOcrPreprocessConfigReader,
   type CommercialOcrPreprocessLimits,
 } from './commercial-ocr-preprocess-config';
@@ -56,15 +58,15 @@ export class CommercialOcrPreprocessUnavailableError extends Error {
 
 @Injectable()
 export class CommercialOcrPreprocessor implements OnModuleDestroy {
-  private readonly sandbox: NativeOcrSandboxClient;
+  private readonly sandbox: NativeOcrSandboxPool;
   private readonly localEnabled: boolean;
   private localPromise: Promise<
     import('./native-ocr-image-preprocessor').NativeOcrImagePreprocessor
   > | null = null;
 
-  constructor(configService: ConfigService) {
+  constructor(configService: ConfigService, @Optional() sandbox?: NativeOcrSandboxPool) {
     const limits = resolveCommercialOcrPreprocessLimits(configService);
-    this.sandbox = new NativeOcrSandboxClient(configService);
+    this.sandbox = sandbox ?? new NativeOcrSandboxPool(configService);
     this.localEnabled = !this.sandbox.isConfigured() && !this.sandbox.isRequired();
     if (this.localEnabled) {
       this.localPromise = import('./native-ocr-image-preprocessor').then(
@@ -76,7 +78,7 @@ export class CommercialOcrPreprocessor implements OnModuleDestroy {
   async prepare(
     input: Buffer,
     pass: CommercialOcrPassName,
-    options: { deadlineAtMs?: number } = {},
+    options: CommercialOcrPreprocessOptions = {},
   ): Promise<CommercialOcrPreparedImage> {
     if (this.sandbox.isConfigured()) {
       const timeoutMs = resolveSandboxPreprocessTimeout(options.deadlineAtMs);

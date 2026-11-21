@@ -353,6 +353,7 @@ resolve_release_fence() {
     fail "Active API image does not match its manifest and protected revision labels."
   EXPECTED_OCR_VERSION="$(maxim_topology_git_commercial_ocr_version "$MANIFEST_SOURCE_SHA")" ||
     fail "Could not derive the exact Commercial OCR version from the active source."
+  maxim_topology_adjust_ocr_compose_for_image COMPOSE_FILES "$MANIFEST_IMAGE_ID"
   maxim_topology_prepare_photo_native_target "$MANIFEST_SOURCE_SHA" COMPOSE_FILES
   if maxim_topology_git_has_ocr_native_sandbox "$MANIFEST_SOURCE_SHA"; then
     EXPECTED_HAS_OCR_NATIVE_SANDBOX=1
@@ -570,7 +571,7 @@ verify_no_unreviewed_running_api_containers() {
   local running_raw inventory expected_auxiliary=none
   local running=()
   if [[ "${EXPECTED_HAS_OCR_NATIVE_SANDBOX:-0}" -eq 1 ]]; then
-    expected_auxiliary="$MAXIM_OCR_NATIVE_SANDBOX_SERVICE"
+    expected_auxiliary="$(maxim_topology_ocr_compose_csv COMPOSE_FILES)" || return 1
   fi
   if [[ "$MAXIM_TARGET_HAS_PHOTO_NATIVE_SANDBOX" -eq 1 ]]; then
     if [[ "$expected_auxiliary" == none ]]; then
@@ -1116,25 +1117,30 @@ api_runtime_signature() {
     printf '%s|%s\n' "$service" "${signatures[$service]}"
   done
   if [[ "${EXPECTED_HAS_OCR_NATIVE_SANDBOX:-0}" -eq 1 ]]; then
-    container_ids_raw="$(
-      timeout --foreground --kill-after=2s "${COMMAND_TIMEOUT_SEC}s" \
-        docker compose "${COMPOSE_FILES[@]}" ps --status running -q \
-          "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" 2>/dev/null
-    )" || return 1
-    container_ids=()
-    [[ -z "$container_ids_raw" ]] || mapfile -t container_ids <<<"$container_ids_raw"
-    [[ "${#container_ids[@]}" -eq 1 ]] || return 1
-    inspect_raw="$(
-      timeout --foreground --kill-after=2s "${COMMAND_TIMEOUT_SEC}s" \
-        docker inspect --format \
-        '{{.Id}}|{{.RestartCount}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
-        "${container_ids[0]}" 2>/dev/null
-    )" || return 1
-    IFS='|' read -r container_id restart_count state health extra <<<"$inspect_raw"
-    [[ -z "$extra" && "$container_id" =~ ^[a-f0-9]{64}$ &&
-      "$restart_count" =~ ^[0-9]+$ && "$state" == "running" && "$health" == "healthy" ]] ||
-      return 1
-    printf '%s|%s|%s\n' "$MAXIM_OCR_NATIVE_SANDBOX_SERVICE" "$container_id" "$restart_count"
+    local ocr_members
+    ocr_members="$(maxim_topology_ocr_services_for_compose COMPOSE_FILES)" || return 1
+    [[ -n "$ocr_members" ]] || return 1
+    while IFS= read -r service; do
+      container_ids_raw="$(
+        timeout --foreground --kill-after=2s "${COMMAND_TIMEOUT_SEC}s" \
+          docker compose "${COMPOSE_FILES[@]}" ps --status running -q \
+            "$service" 2>/dev/null
+      )" || return 1
+      container_ids=()
+      [[ -z "$container_ids_raw" ]] || mapfile -t container_ids <<<"$container_ids_raw"
+      [[ "${#container_ids[@]}" -eq 1 ]] || return 1
+      inspect_raw="$(
+        timeout --foreground --kill-after=2s "${COMMAND_TIMEOUT_SEC}s" \
+          docker inspect --format \
+          '{{.Id}}|{{.RestartCount}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+          "${container_ids[0]}" 2>/dev/null
+      )" || return 1
+      IFS='|' read -r container_id restart_count state health extra <<<"$inspect_raw"
+      [[ -z "$extra" && "$container_id" =~ ^[a-f0-9]{64}$ &&
+        "$restart_count" =~ ^[0-9]+$ && "$state" == "running" && "$health" == "healthy" ]] ||
+        return 1
+      printf '%s|%s|%s\n' "$service" "$container_id" "$restart_count"
+    done <<<"$ocr_members"
   fi
 }
 

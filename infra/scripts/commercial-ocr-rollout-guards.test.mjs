@@ -363,7 +363,7 @@ test('checks role-aware readiness, image, service identity, role, and rollout pa
   );
   assert.match(readinessBlock, /wait "\$pid"/u);
   assert.match(readinessBlock, /api_runtime_signature/u);
-  assert.match(readinessBlock, /MAXIM_OCR_NATIVE_SANDBOX_SERVICE/u);
+  assert.match(readinessBlock, /maxim_topology_ocr_services_for_compose/u);
   assert.match(readinessBlock, /API_STABILITY_WINDOW_SEC/u);
   assert.match(rollout, /docker exec "\$\{container_ids\[0\]\}" node -e/u);
   assert.match(rollout, /'\{\{\.RestartCount\}\}'/u);

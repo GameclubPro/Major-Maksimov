@@ -194,6 +194,22 @@ function remoteCall(t, overrides = {}, args = []) {
   mkdirSync(binaries);
   const wrapper = join(scripts, 'vps-source-abandonment-corrective.sh');
   copyFileSync(new URL('./vps-source-abandonment-corrective.sh', import.meta.url), wrapper);
+  for (const name of ['deploy-topology.sh', 'photo-native-lifecycle.sh'])
+    copyFileSync(new URL(`./lib/${name}`, import.meta.url), join(scripts, 'lib', name));
+  writeFileSync(
+    join(binaries, 'docker'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+[[ "\${FIXTURE_LOCK_HELD:-}" == 1 ]] || exit 91
+case "$*" in
+  'ps --all --quiet --no-trunc --filter label=com.docker.compose.project=infra --filter label=com.docker.compose.service=ocr-native-sandbox-2')
+    if [[ "$FIXTURE_EXTRA_OCR_WORKER" == 1 ]]; then printf '%064d\\n' 2; fi ;;
+  'ps --all --quiet --no-trunc --filter label=com.docker.compose.project=infra --filter label=com.docker.compose.service=ocr-native-sandbox-3') ;;
+  *) exit 90 ;;
+esac
+`,
+    { mode: 0o700 },
+  );
   writeFileSync(
     join(scripts, 'lib/deploy-lock.sh'),
     `acquire_deploy_lock() {
@@ -253,6 +269,7 @@ cat > "$FIXTURE_FORWARDED"
       FIXTURE_DIRTY_AFTER_LOCK: '0',
       FIXTURE_LOCK_STATUS: '0',
       FIXTURE_LOCK_HELD: '',
+      FIXTURE_EXTRA_OCR_WORKER: '0',
       FIXTURE_CHANGED_AFTER_LOCK: '0',
       FIXTURE_GIT_FAILURE: '',
       ...overrides,
@@ -288,4 +305,13 @@ test('remote source, tracked dirt and lock failures never execute the controller
   const extra = remoteCall(t, {}, ['unexpected']);
   assert.equal(extra.status, 2);
   assert.equal(extra.trace, '');
+});
+
+
+test('remote corrective wrapper refuses a multiworker OCR runtime before executing the controller', (t) => {
+  const result = remoteCall(t, { FIXTURE_EXTRA_OCR_WORKER: '1' });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /only accepts a single OCR worker/u);
+  assert.equal(result.trace, 'LOCK\n');
+  assert.equal(result.forwarded, '');
 });

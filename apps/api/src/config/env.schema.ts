@@ -20,6 +20,10 @@ import {
 } from '../moderation/photo-duplicate/photo-duplicate.runtime';
 import { COMMERCIAL_OCR_ROLLOUT_MODES } from '../moderation/commercial-ocr/commercial-ocr.runtime';
 import { COMMERCIAL_OCR_DEFAULT_VERSION } from '../moderation/commercial-ocr/commercial-ocr.queue';
+import {
+  NATIVE_OCR_SANDBOX_DEFAULT_SOCKET_PATH,
+  NATIVE_OCR_SANDBOX_POOL_SOCKET_PATHS,
+} from '../moderation/commercial-ocr/native-ocr-sandbox.protocol';
 import { IMAGE_TEXT_STOP_LIST_OCR_ROLLOUT_MODES } from '../moderation/commercial-ocr/image-text-stop-list.runtime';
 import { parseCanonicalCommercialOcrApprovalPublicKeyBase64 } from '../moderation/commercial-ocr/commercial-ocr-approval-key';
 import { DEFAULT_MAX_PUBLISHER_BOT_ID } from '../publisher/publisher-bot-descriptor';
@@ -497,6 +501,9 @@ const envSchema = z.object({
     .max(100)
     .regex(/^\/run\/maxim-ocr\/[A-Za-z0-9._-]+\.sock$/u)
     .optional(),
+  COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS: z
+    .union([z.literal(''), z.literal(NATIVE_OCR_SANDBOX_POOL_SOCKET_PATHS)])
+    .optional(),
   COMMERCIAL_OCR_CANARY_CHAT_IDS: commercialOcrExactChatIdsSchema.default(''),
   COMMERCIAL_OCR_VERSION: z
     .string()
@@ -904,6 +911,16 @@ export function validateEnv(config: Record<string, unknown>): EnvSchema {
   ) {
     throw new Error(
       'Environment validation failed: COMMERCIAL_OCR_MAX_CHAT_IMAGE_UNITS must not exceed COMMERCIAL_OCR_MAX_GLOBAL_IMAGE_UNITS',
+    );
+  }
+  if (
+    parsed.data.COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS &&
+    (parsed.data.APP_SERVICE_NAME !== 'api-media-analysis' ||
+      parsed.data.COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH !==
+        NATIVE_OCR_SANDBOX_DEFAULT_SOCKET_PATH)
+  ) {
+    throw new Error(
+      'Environment validation failed: COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS requires api-media-analysis and the primary OCR socket',
     );
   }
   if (

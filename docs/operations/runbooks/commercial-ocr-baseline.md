@@ -114,8 +114,11 @@ The diagnostic remains limited to 512 bytes with a 25 ms flush deadline; require
 containment never waits longer for logging. This metadata does not change the UDS
 request/response schema or reinterpret historical lifecycle evidence.
 
-There is one production OCR consumer. Under `slow`, it admits at most one cache-miss
-pass per governor retry interval; downloads and cache hits do not consume the slot.
+The single production OCR queue consumer dispatches to three independently isolated native
+containers with one native worker, 1 CPU and 1 GiB each. The deployment fence attests every
+member and runs a raster smoke through each distinct Unix socket before releasing producers.
+Under `slow`, the consumer admits at most one cache-miss pass per governor retry interval.
+Downloads and cache hits use no slow slot.
 Fresh `pause` decisions are checked before preprocessing and native dispatch.
 Automatic queue-only degradation uses this bounded slow path after the governor's
 host-pressure check, so one unrelated old webhook cannot indefinitely stop every
@@ -123,14 +126,24 @@ image analysis. Both Compose topologies explicitly enable
 `BACKGROUND_GOVERNOR_SYSTEM_PRESSURE_ENABLED` for `api-media-analysis`; verify the
 effective container flag after rollout. Keep its existing governor intervals and
 thresholds when enabling this guard. Manual, MAX-only, mixed and unknown degradation
-still pause; hard CPU/IO pressure also refuses the slow path. The original job deadline, single
-consumer, native resource limits and final delete guards remain unchanged. A
+still pause; hard CPU/IO pressure also refuses the slow path. The original job deadline, single queue role,
+native resource limits per sandbox and final delete guards remain unchanged. A
 completed primary pass stays in the exact content/version/profile cache when
 confirmation is deferred; resumption still needs a complete confirmed result.
 `event_to_terminal` measures event age at terminal completion separately from
 per-attempt `end_to_end`. Completed BullMQ jobs alone do not prove complete analysis;
 use `analysis.terminal.complete`, `analysis.terminal.incomplete`, native failure
 reasons and deadline-exhaustion counters together.
+
+Production enqueue and media-processing counters share the deployed native profile scope.
+Read `admission.rejected.global` and `admission.rejected.chat` alongside `enqueue.queued`
+to measure overload before BullMQ. The `admission.image_units.*` counters show the number of
+photos represented by those reservations or refusals. After a release, compare complete windows with the same
+behavior scope and retain the observation gap across profile changes. The fixed
+`source.exact.failure.initial.*` and `source.exact.failure.revalidation.*` counters
+distinguish unavailable original messages from failed pre-intent revalidation. HTTP 404/410
+counts can include access loss or a missing message. Track them as incomplete reads without
+assuming deletion. The counters exclude source identifiers, response bodies and OCR text.
 
 Both preprocess profiles are v4 after enforcing the actual output pixel-area cap.
 The grayscale/threshold transforms, two-pass deletion evidence and admission

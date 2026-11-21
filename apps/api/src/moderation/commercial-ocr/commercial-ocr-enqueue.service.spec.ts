@@ -104,12 +104,13 @@ describe('CommercialOcrEnqueueService', () => {
       telemetry as never,
     );
 
-    await expect(service.enqueue({ ...input, registerPendingActivation: jest.fn() })).resolves.toBe(
-      'queued',
-    );
+    await expect(
+      service.enqueue({ ...input, imageCount: 7, registerPendingActivation: jest.fn() }),
+    ).resolves.toBe('queued');
 
     expect(telemetry.recordCounter.mock.calls).toEqual([
       ['admission.admitted.pending'],
+      ['admission.image_units.admitted', 7],
       ['enqueue.queued'],
     ]);
   });
@@ -130,10 +131,13 @@ describe('CommercialOcrEnqueueService', () => {
       telemetry as never,
     );
 
-    await service.enqueue(input);
+    await service.enqueue({ ...input, imageCount: 9 });
 
     expect(telemetry.recordCounter).toHaveBeenCalledWith(counter);
     expect(telemetry.recordCounter).toHaveBeenCalledWith('enqueue.skipped');
+    if (kind !== 'rejected_age') {
+      expect(telemetry.recordCounter).toHaveBeenCalledWith(`admission.image_units.${kind}`, 9);
+    }
   });
 
   it('suppresses a reservation that commits after reserve returned unavailable', async () => {

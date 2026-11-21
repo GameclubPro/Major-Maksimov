@@ -27,6 +27,7 @@ compose_validation -f infra/docker-compose.yml
 compose_validation -f infra/docker-compose.yml -f infra/docker-compose.local.yml
 compose_validation -f infra/docker-compose.yml -f infra/docker-compose.scale.yml
 compose_validation -f infra/docker-compose.yml -f infra/docker-compose.runtime-no-build.yml
+compose_validation -f infra/docker-compose.yml -f infra/docker-compose.ocr-single.yml
 MAXIM_ERASER_IMAGE=maxim-eraser:infra-check compose_validation -f infra/docker-compose.yml -f infra/docker-compose.eraser-no-build.yml
 compose_validation -p infra-scale -f infra/docker-compose.scale.yml -f infra/docker-compose.runtime-no-build.yml
 if command -v shellcheck >/dev/null 2>&1; then

@@ -21,6 +21,8 @@ x-spammer-read-model-shadow-env: &spammer-read-model-shadow-env
   IMAGE_TEXT_STOP_LIST_OCR_ROLLOUT_MODE: ${IMAGE_TEXT_STOP_LIST_OCR_ROLLOUT_MODE:-on}
   COMMERCIAL_OCR_CANARY_CHAT_IDS: ${COMMERCIAL_OCR_CANARY_CHAT_IDS:-}
   COMMERCIAL_OCR_VERSION: ${COMMERCIAL_OCR_VERSION:-tesseract-rus-eng-v2}
+  COMMERCIAL_OCR_MAX_GLOBAL_IMAGE_UNITS: ${COMMERCIAL_OCR_MAX_GLOBAL_IMAGE_UNITS:-48}
+  COMMERCIAL_OCR_MAX_CHAT_IMAGE_UNITS: ${COMMERCIAL_OCR_MAX_CHAT_IMAGE_UNITS:-16}
   COMMERCIAL_OCR_CERTIFICATION_APPROVAL_PUBLIC_KEY_BASE64: ${COMMERCIAL_OCR_CERTIFICATION_APPROVAL_PUBLIC_KEY_BASE64:-}
 
 x-default-logging: &default-logging
@@ -789,6 +791,116 @@ services:
       retries: 3
       start_period: 20s
 
+  ocr-native-sandbox-2:
+    image: ${MAXIM_API_IMAGE:-maxim-api:local}
+    labels:
+      com.maxim.ocr-native-sandbox: 'true'
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    command:
+      - node
+      - apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js
+    restart: unless-stopped
+    init: true
+    user: '1000:1000'
+    network_mode: none
+    deploy:
+      replicas: 1
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,uid=1000,gid=1000
+    logging: *default-logging
+    environment:
+      NODE_ENV: production
+      COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: /run/maxim-ocr-2/native-ocr.sock
+      PHOTO_DUPLICATE_MAX_BYTES: 16777216
+      COMMERCIAL_OCR_MAX_INPUT_PIXELS: 40000000
+      COMMERCIAL_OCR_MAX_OUTPUT_PIXELS: 3000000
+      COMMERCIAL_OCR_MAX_SIDE: 2000
+      COMMERCIAL_OCR_TESSERACT_BINARY: tesseract
+      COMMERCIAL_OCR_TESSERACT_CONCURRENCY: 1
+      COMMERCIAL_OCR_TESSERACT_MAX_QUEUE: 4
+      COMMERCIAL_OCR_TESSERACT_RECYCLE_AFTER_JOBS: 250
+      COMMERCIAL_OCR_TESSERACT_TIMEOUT_MS: 10000
+      COMMERCIAL_OCR_TESSERACT_MAX_IMAGE_BYTES: 16777216
+      COMMERCIAL_OCR_TESSERACT_MAX_OUTPUT_BYTES: 4194304
+      OMP_THREAD_LIMIT: 1
+    volumes:
+      - ocr_native_ipc_2:/run/maxim-ocr-2
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js
+        - --probe
+      interval: 10s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+
+  ocr-native-sandbox-3:
+    image: ${MAXIM_API_IMAGE:-maxim-api:local}
+    labels:
+      com.maxim.ocr-native-sandbox: 'true'
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    command:
+      - node
+      - apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js
+    restart: unless-stopped
+    init: true
+    user: '1000:1000'
+    network_mode: none
+    deploy:
+      replicas: 1
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,uid=1000,gid=1000
+    logging: *default-logging
+    environment:
+      NODE_ENV: production
+      COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: /run/maxim-ocr-3/native-ocr.sock
+      PHOTO_DUPLICATE_MAX_BYTES: 16777216
+      COMMERCIAL_OCR_MAX_INPUT_PIXELS: 40000000
+      COMMERCIAL_OCR_MAX_OUTPUT_PIXELS: 3000000
+      COMMERCIAL_OCR_MAX_SIDE: 2000
+      COMMERCIAL_OCR_TESSERACT_BINARY: tesseract
+      COMMERCIAL_OCR_TESSERACT_CONCURRENCY: 1
+      COMMERCIAL_OCR_TESSERACT_MAX_QUEUE: 4
+      COMMERCIAL_OCR_TESSERACT_RECYCLE_AFTER_JOBS: 250
+      COMMERCIAL_OCR_TESSERACT_TIMEOUT_MS: 10000
+      COMMERCIAL_OCR_TESSERACT_MAX_IMAGE_BYTES: 16777216
+      COMMERCIAL_OCR_TESSERACT_MAX_OUTPUT_BYTES: 4194304
+      OMP_THREAD_LIMIT: 1
+    volumes:
+      - ocr_native_ipc_3:/run/maxim-ocr-3
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js
+        - --probe
+      interval: 10s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+
   api-media-analysis:
     image: ${MAXIM_API_IMAGE:-maxim-api:local}
     build:
@@ -822,6 +934,7 @@ services:
       MODERATION_ENABLED_QUEUES: none
       MODERATION_BACKGROUND_TASKS_ENABLED: 'false'
       COMMERCIAL_OCR_NATIVE_SANDBOX_SOCKET_PATH: /run/maxim-ocr/native-ocr.sock
+      COMMERCIAL_OCR_NATIVE_SANDBOX_POOL_SOCKET_PATHS: /run/maxim-ocr-2/native-ocr.sock,/run/maxim-ocr-3/native-ocr.sock
       PHOTO_DUPLICATE_MAX_BYTES: 16777216
       COMMERCIAL_OCR_MAX_INPUT_PIXELS: 40000000
       COMMERCIAL_OCR_MAX_OUTPUT_PIXELS: 3000000
@@ -842,12 +955,18 @@ services:
       MAX_API_CHAT_RPS: 5
     volumes:
       - ocr_native_ipc:/run/maxim-ocr:ro
+      - ocr_native_ipc_2:/run/maxim-ocr-2:ro
+      - ocr_native_ipc_3:/run/maxim-ocr-3:ro
     depends_on:
       postgres:
         condition: service_started
       redis:
         condition: service_started
       ocr-native-sandbox:
+        condition: service_healthy
+      ocr-native-sandbox-2:
+        condition: service_healthy
+      ocr-native-sandbox-3:
         condition: service_healthy
 
   api-action:
@@ -1089,5 +1208,7 @@ volumes:
       device: /mnt/maxim-cold/runtime/eraser/redis
   photo_native_ipc:
   ocr_native_ipc:
+  ocr_native_ipc_2:
+  ocr_native_ipc_3:
   postgres_data:
   redis_data:
