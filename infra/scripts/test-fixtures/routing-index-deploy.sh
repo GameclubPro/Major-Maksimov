@@ -66,7 +66,7 @@ case "$failure" in
     exit 0 ;;
 esac
 case "$failure" in
-  compatible|changed-before-pause|changed-after-pause|giveaway-stop-refused|applied|lock|authority|prepare|capacity|prepare-incomplete|giveaway-deferral|publisher-deferral|deferral-runner-failed|deferral-wrong-readback|deferral-authority|ref-rollback-*) ;;
+  compatible|changed-before-pause|changed-after-pause|giveaway-stop-refused|applied|lock|authority|prepare|capacity|prepare-incomplete|giveaway-deferral|publisher-deferral|spammer-deferral|spammer-runner-failed|spammer-readback-refused|spammer-capacity|spammer-lost-authority|deferral-runner-failed|deferral-wrong-readback|deferral-authority|ref-rollback-*) ;;
   *) exit 99 ;;
 esac
 
@@ -88,18 +88,19 @@ require_deploy_lock() {
 maxim_require_ordinary_effect_authority() {
   [[ "$#" == 1 && "$1" == "$ROOT_DIR" ]] || return 99
   require_deploy_lock || return
-  if [[ "$failure" == authority || ( "$failure" == deferral-authority && "$phase" == prepare ) ]]; then
+  if [[ "$failure" == authority || ( "$failure" == deferral-authority && "$phase" == prepare ) ||
+        ( "$failure" == spammer-lost-authority && -f "$tmpdir/compose-ready" ) ]]; then
     echo fixture-authority-refused >&3
     return 1
   fi
 }
-ensure_compose_env() { :; }
+ensure_compose_env() { touch "$tmpdir/compose-ready"; }
 node() {
   local script="$1" operation="$2" arg state
   shift 2
   local -a expected=("${COMPOSE_FILES[@]}")
   if [[ "$phase" == prepare ]]; then expected=("${MIGRATION_COMPOSE_FILES[@]}"); fi
-  if [[ "$operation" == release-state ]]; then
+  if [[ "$operation" == release-state || "$operation" == preflight-spammer || "$operation" == prepare-spammer ]]; then
     [[ "$1" == "$TARGET_SHA" ]] || return 99
     shift
   fi
@@ -113,10 +114,16 @@ node() {
       case "$failure:$phase" in
         changed-before-pause:rollout|changed-after-pause:post-migration|capacity:*|prepare-incomplete:*)
           state=prepare_routing ;;
-        giveaway-deferral:*|publisher-deferral:*|deferral-runner-failed:*|deferral-wrong-readback:*|deferral-authority:*)
-          if [[ ! -f "$tmpdir/giveaway-prepared" ]]; then
+        giveaway-deferral:*|publisher-deferral:*|spammer-deferral:*|spammer-runner-failed:*|spammer-readback-refused:*|spammer-capacity:*|spammer-lost-authority:*|deferral-runner-failed:*|deferral-wrong-readback:*|deferral-authority:*)
+          if [[ ! -f "$tmpdir/deferral-prepared" ]]; then
             state=prepare_giveaway_deferral
-            if [[ "$failure" == publisher-deferral ]]; then state=prepare_publisher_deferral; fi
+            case "$failure" in
+              publisher-deferral) state=prepare_publisher_deferral ;;
+              spammer-*) state=prepare_spammer_deferral ;;
+            esac
+          elif [[ "$failure" == spammer-readback-refused ]]; then
+            echo fixture-catalog-refused >&3
+            return 1
           elif [[ "$failure" == deferral-wrong-readback ]]; then
             state=already_applied
           else
@@ -131,6 +138,16 @@ node() {
       esac
       printf 'fixture-state:%s:%s\n' "$phase" "$state" >&3
       echo "$state" ;;
+    "$ROOT_DIR/infra/scripts/routing-index-online-supervisor.mjs:preflight-spammer")
+      [[ "$phase" == preflight && "$BASHPID" == "$deploy_owner" ]] || return 99
+      echo fixture-spammer-capacity >&3
+      [[ "$failure" != spammer-capacity ]] ;;
+    "$ROOT_DIR/infra/scripts/routing-index-online-supervisor.mjs:prepare-spammer")
+      [[ "$phase" == prepare && "$BASHPID" == "$deploy_owner" && -f "$tmpdir/compose-ready" ]] || return 99
+      [[ "$MAXIM_MIGRATION_API_IMAGE" == "$MAXIM_API_IMAGE" ]] || return 99
+      echo fixture-spammer-supervisor >&3
+      [[ "$failure" != spammer-runner-failed ]] || return 1
+      touch "$tmpdir/deferral-prepared" ;;
     "$ROOT_DIR/infra/scripts/routing-index-online-supervisor.mjs:preflight")
       echo fixture-capacity >&3
       [[ "$failure" != capacity ]] ;;
@@ -209,7 +226,7 @@ docker() {
     done
     if [[ "$failure" == publisher-deferral ]]; then echo fixture-publisher-prisma >&3; else echo fixture-giveaway-prisma >&3; fi
     [[ "$failure" != deferral-runner-failed ]] || return 1
-    touch "$tmpdir/giveaway-prepared"
+    touch "$tmpdir/deferral-prepared"
     return 0
   fi
   [[ "$*" == "compose ${COMPOSE_FILES[*]} stop -t 60 api-action api-admin" ]] || return 99

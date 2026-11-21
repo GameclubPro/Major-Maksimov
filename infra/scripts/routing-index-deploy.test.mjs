@@ -123,6 +123,46 @@ test('Publisher fixed migrations run under the same authority and require compat
   ]);
 });
 
+const spammerPreparation = [
+  'fixture-state:preflight:prepare_spammer_deferral',
+  'fixture-spammer-capacity',
+  'fixture-state:prepare:prepare_spammer_deferral',
+  'fixture-spammer-supervisor',
+];
+
+test('spammer projection migrations require a compatible catalog before the journal and skip general Prisma', () => {
+  assert.deepEqual(runScenario('spammer-deferral'), [
+    ...spammerPreparation,
+    'fixture-state:prepare:compatible_pending',
+    'fixture-journal',
+    'fixture-state:rollout:compatible_pending',
+    'fixture-pause',
+    'fixture-state:post-migration:compatible_pending',
+    'fixture-transition',
+  ]);
+});
+
+test('spammer projection preparation refuses either a failed runner or an unverified catalog before journaling', () => {
+  assert.deepEqual(runScenario('spammer-runner-failed', false), spammerPreparation);
+  assert.deepEqual(runScenario('spammer-readback-refused', false), [
+    ...spammerPreparation,
+    'fixture-catalog-refused',
+  ]);
+});
+
+test('spammer projection capacity and renewed authority both precede its supervised migration', () => {
+  assert.deepEqual(runScenario('spammer-capacity', false), [
+    'fixture-state:preflight:prepare_spammer_deferral',
+    'fixture-spammer-capacity',
+  ]);
+  assert.deepEqual(runScenario('spammer-lost-authority', false), [
+    'fixture-state:preflight:prepare_spammer_deferral',
+    'fixture-spammer-capacity',
+    'fixture-state:prepare:prepare_spammer_deferral',
+    'fixture-authority-refused',
+  ]);
+});
+
 test('a failed giveaway migration runner stops before journaling or replacing roles', () => {
   assert.deepEqual(runScenario('deferral-runner-failed', false), giveawayDeferralStart);
 });

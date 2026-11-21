@@ -55,6 +55,18 @@ migration, then verifies their types, nullability and defaults after commit. The
 image can apply the two preceding giveaway migrations first if they are still pending.
 The successful ordered prefix and both modules' catalogs must match before the release can
 continue. Partial objects, failed receipts and an unknown migration tail stop this deferral.
+The release ending at `20261121000100_index_spammer_projection_due` adds a third fixed
+deferral. It requires the preceding Publisher and giveaway receipts. The verified API image
+may apply the nullable `spammer_observations.projection_due_at` column and its concurrent
+partial index under the deploy lock while the previous roles serve traffic. The controller
+calls `preflight-spammer` to check capacity for the exact release SHA. After image verification
+it confirms deploy authority and calls `prepare-spammer`. The supervisor watches the migration
+attempt. The projection table, including TOAST, has a 3 GiB admission ceiling. The migration
+session caps locks at 5 seconds, statements at 45 seconds and temporary files at 256 MiB.
+A fresh PostgreSQL catalog and receipt
+read must return `compatible_pending` before the runtime journal opens. Failed or partial
+preparation stops the release there. The controller repeats the read before queue pause and
+role replacement. The general Prisma runner stays skipped while the routing index is deferred.
 A later release containing another migration returns to the normal routing-index admission.
 
 Both API rollback paths refuse a source that cannot read the applied migrations or requires a

@@ -203,6 +203,23 @@ export async function createRoutingIndexOnlineClientLauncher(composeArgs, select
   );
 }
 
+export async function createSpammerProjectionOnlineClientLauncher(
+  composeArgs,
+  selector,
+  options = {},
+) {
+  if (selector !== 'spammer_projection') fail('TARGET_INVALID');
+  return createOnlineClientLauncher(
+    composeArgs,
+    options,
+    (applicationName, identity) => [
+      ...routingIndexOnlineClientCreateArgs(applicationName, identity),
+      '--spammer-deferral',
+    ],
+    verifyRoutingIndexDatabaseUrl,
+  );
+}
+
 async function createOnlineClientLauncher(
   composeArgs,
   { run = runClientCommand, env = process.env, start = spawn },

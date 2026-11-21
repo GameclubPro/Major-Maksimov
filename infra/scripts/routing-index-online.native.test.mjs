@@ -9,7 +9,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   GIVEAWAY_DEFERRAL_MIGRATIONS,
   PUBLISHER_DEFERRAL_MIGRATION,
+  SPAMMER_DEFERRAL_MIGRATIONS,
   verifyPublisherDeferralState,
+  verifySpammerDeferralState,
   verifyGiveawayDeferralState,
 } from '../../scripts/agent/routing-index-catalog.mjs';
 import { createRoutingIndexMigrationPrefix } from '../../scripts/agent/routing-index-online-prepare.mjs';
@@ -276,6 +278,7 @@ for (const scenario of [
   'publisher-fresh',
   'publisher-after-giveaway',
   'publisher-failed',
+  'spammer-projection',
 ]) {
   test(
     `fixed migration deferral with genuine Prisma receipts: ${scenario}`,
@@ -288,7 +291,12 @@ for (const scenario of [
       );
       const [first, second] = GIVEAWAY_DEFERRAL_MIGRATIONS;
       const publisher = scenario.startsWith('publisher-');
-      const last = publisher ? PUBLISHER_DEFERRAL_MIGRATION : second;
+      const spammer = scenario === 'spammer-projection';
+      const last = spammer
+        ? SPAMMER_DEFERRAL_MIGRATIONS.at(-1)
+        : publisher
+          ? PUBLISHER_DEFERRAL_MIGRATION
+          : second;
       // FLAG: The one-off deferral only accepts the release ending at these exact migrations.
       // Exercise that release from real immutable SQL even after newer migrations are committed.
       const releaseRoot = mkdtempSync(resolve(tmpdir(), 'routing-giveaway-release-'));
@@ -342,6 +350,13 @@ for (const scenario of [
             { recursive: true },
           );
         }
+        if (spammer) {
+          for (const { name } of [...GIVEAWAY_DEFERRAL_MIGRATIONS, PUBLISHER_DEFERRAL_MIGRATION]) {
+            cpSync(resolve(files, 'migrations', name), resolve(basePath, name), {
+              recursive: true,
+            });
+          }
+        }
         if (scenario === 'publisher-after-giveaway') {
           for (const { name } of GIVEAWAY_DEFERRAL_MIGRATIONS) {
             cpSync(resolve(files, 'migrations', name), resolve(basePath, name), {
@@ -367,6 +382,49 @@ for (const scenario of [
         );
         assert.equal(bootstrap.status, 0, 'Prisma prerequisite history');
         const before = await snapshot();
+        if (spammer) {
+          const args = ['--spammer-deferral'];
+          assert.deepEqual(verifySpammerDeferralState(before, releaseSource), {
+            state: 'prepare_spammer_deferral',
+            pending: SPAMMER_DEFERRAL_MIGRATIONS.map(({ name }) => name),
+          });
+          assert.equal(
+            verifyReleaseRoutingState(before, { source: releaseSource, supportsOrdered: true }),
+            'prepare_spammer_deferral',
+          );
+          await db.query(`
+            CREATE FUNCTION fixture_assert_spammer_limits() RETURNS event_trigger LANGUAGE plpgsql AS '
+            BEGIN
+              IF current_setting(''application_name'') NOT LIKE ''maxim-online-%''
+                OR current_setting(''lock_timeout'') <> ''5s''
+                OR current_setting(''statement_timeout'') <> ''45s''
+                OR current_setting(''temp_file_limit'') <> ''256MB''
+                OR current_setting(''maintenance_work_mem'') <> ''64MB''
+                OR current_setting(''max_parallel_maintenance_workers'') <> ''0'' THEN
+                RAISE EXCEPTION ''fixture migration runtime limits were missing'';
+              END IF;
+            END';
+            CREATE EVENT TRIGGER fixture_check_spammer_limits ON ddl_command_start
+              WHEN TAG IN ('ALTER TABLE', 'CREATE INDEX') EXECUTE FUNCTION fixture_assert_spammer_limits();
+          `);
+          const applied = runner(...args);
+          assert.equal(applied.status, 0, applied.stderr);
+          const after = await snapshot();
+          assert.equal(after.index.present, false);
+          assert.equal(after.orderedIndex.exact, true);
+          assert.deepEqual(after.spammerSchema, { column: 'exact', index: 'exact' });
+          assert.deepEqual(verifySpammerDeferralState(after, releaseSource), {
+            state: 'compatible_pending',
+            pending: [],
+          });
+          assert.equal(
+            verifyReleaseRoutingState(after, { source: releaseSource, supportsOrdered: true }),
+            'compatible_pending',
+          );
+          assert.equal(runner(...args).status, 0);
+          assert.deepEqual((await snapshot()).receipts, after.receipts);
+          return;
+        }
         if (publisher) {
           const args = ['--publisher-deferral'];
           const expected =

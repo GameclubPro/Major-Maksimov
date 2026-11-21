@@ -10,6 +10,9 @@ import {
   GIVEAWAY_DEFERRAL_MIGRATIONS,
   PUBLISHER_DEFERRAL_MIGRATION,
   verifyPublisherDeferralState,
+  SPAMMER_DEFERRAL_MIGRATIONS,
+  assertSpammerDeferralSource,
+  verifySpammerDeferralState,
   routingIndexStateSql,
   verifyGiveawayDeferralState,
   verifyRoutingIndexState,
@@ -167,6 +170,8 @@ export function verifyReleaseRoutingState(snapshot, { source, supportsOrdered })
     snapshot.orderedIndex.exact === true
   ) {
     if (source.at(-1)?.name === ROUTING_INDEX_TARGET.migration) return 'compatible_pending';
+    if (source.at(-1)?.name === SPAMMER_DEFERRAL_MIGRATIONS.at(-1).name)
+      return verifySpammerDeferralState(snapshot, source).state;
     if (source.at(-1)?.name === PUBLISHER_DEFERRAL_MIGRATION.name)
       return verifyPublisherDeferralState(snapshot, source).state;
     if (source.at(-1)?.name === GIVEAWAY_DEFERRAL_MIGRATIONS.at(-1).name)
@@ -178,10 +183,15 @@ export function verifyReleaseRoutingState(snapshot, { source, supportsOrdered })
 export async function readReleaseRoutingState(
   sha,
   composeArgs,
-  { root = process.cwd(), run = runOutcomeCohortCommand } = {},
+  { root = process.cwd(), run = runOutcomeCohortCommand, requireSpammerDeferral = false } = {},
 ) {
   await validateCompose(composeArgs);
   const release = readReleaseRoutingSource(root, sha);
+  if (requireSpammerDeferral) {
+    if (release.supportsOrdered !== true) fail('SPAMMER_DEFERRAL_TARGET_INVALID');
+    assertSpammerDeferralSource(release.source);
+    return verifySpammerDeferralState(await readSnapshot(composeArgs, run), release.source).state;
+  }
   if (release.state === 'not_in_target') return release.state;
   return verifyReleaseRoutingState(await readSnapshot(composeArgs, run), release);
 }
