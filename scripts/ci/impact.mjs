@@ -91,6 +91,8 @@ const LOCAL_TOOLING_PATHS = new Set([
   'scripts/agent/task-worktree.mjs',
   'scripts/agent/test/context.test.mjs',
   'scripts/agent/test/focused.test.mjs',
+  'scripts/agent/test/publication-policy-rollback.test.mjs',
+  'scripts/agent/test/support-llm-knowledge.test.mjs',
   'scripts/agent/test/task-worktree.test.mjs',
   'scripts/check-docs.mjs',
   'scripts/check-docs.test.mjs',
