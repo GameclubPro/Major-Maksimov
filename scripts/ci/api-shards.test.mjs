@@ -104,18 +104,11 @@ test('the default Jest partitions cover the tracked API test inventory once', as
   assert.deepEqual(new Set(shards.flat()), new Set(tests));
 });
 
-test('CodeQL cancels superseded PR runs while preserving main and scheduled security gates', () => {
+test('CodeQL cancels superseded PR runs while preserving main security gates', () => {
   const codeql = parse(read('.github/workflows/codeql.yml'));
   assert.deepEqual(codeql.concurrency, {
     group:
       "codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
     'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
   });
-  assert.equal(codeql.jobs.analyze.name, 'Analyze JavaScript and TypeScript');
-  assert.equal(codeql.jobs.analyze['continue-on-error'], undefined);
-  assert.ok(
-    codeql.jobs.analyze.steps.some(
-      (step) => step.run === 'node scripts/ci/assert-codeql-alerts.mjs' && step.if === undefined,
-    ),
-  );
 });

@@ -5,8 +5,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '17 2 * * 1'
 
 permissions:
   contents: read
@@ -14,7 +12,7 @@ permissions:
 
 concurrency:
   # FLAG: Pending jobs also replace each other in a concurrency group. Give
-  # non-PR runs unique groups so every main/scheduled SHA can finish its gate.
+  # non-PR runs unique groups so every main SHA can finish its gate.
   group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -30,11 +28,16 @@ jobs:
         with:
           languages: javascript-typescript
           build-mode: none
+          config: |
+            paths-ignore:
+              - '**/*.test.*'
+              - '**/*.spec.*'
       - name: Analyze
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
-          upload-database: ${{ github.event_name == 'schedule' }}
+          upload-database: false
       - name: Reject open high-severity alerts
         env:
+          CODEQL_ANALYSIS_CATEGORY: .github/workflows/codeql.yml:analyze
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/ci/assert-codeql-alerts.mjs

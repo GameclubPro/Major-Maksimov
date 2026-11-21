@@ -65,9 +65,16 @@ rerun all jobs in that case. A successful trusted main run saves its certificate
 `ci-main-green-SHA-RUNID-ATTEMPT`. A later run can use it only after the exact CodeQL gate also
 succeeds. Concurrent runs can finish in any order without changing a plan already in progress.
 
-Ordinary CodeQL runs continue analysis, SARIF upload and the high-severity alert gate. Database
-upload runs on the weekly schedule. Compare durations on equivalent runs before claiming a
-measured improvement.
+The required CodeQL check runs on PRs and main pushes. It analyzes JavaScript and TypeScript
+with the default queries and excludes files named `*.test.*` and `*.spec.*`. The check requires
+a processed SARIF analysis for its own category and the exact ref and SHA. Open high or critical
+alerts in that category fail the check.
+
+[CodeQL Full](../../.github/workflows/codeql-full.yml) scans the full repository every Monday
+and can also run manually. It uploads the database, reports SARIF in its own category and fails
+on open high or critical alerts in that category. Review those findings through the full workflow
+or GitHub code scanning. Its results are separate from the required release check. Compare
+durations on equivalent runs before claiming a measured improvement.
 
 The exact reviewed host release paths in `HOST_RELEASE_TOOLING_PATHS` select core and both
 infrastructure shards through the frozen plan's `staticInfra` field. The shards retain actionlint,

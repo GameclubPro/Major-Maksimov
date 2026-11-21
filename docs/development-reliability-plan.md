@@ -313,7 +313,8 @@ with one serial worker per job. A fifth job uses public `check:ci:build` for gen
 types, retention storage checks and build, then runs the existing Redis cases. Every part blocks
 `Required`; PostgreSQL and benchmark lanes retain their separate complete coverage. See
 [local setup and partition inspection](development/agent-local-environment.md#api-ci-partitioning).
-CodeQL cancels superseded runs of the same PR, while main and scheduled runs remain uncancelled.
+CodeQL cancels superseded runs of the same PR and preserves main runs. The separate weekly full
+scan is described in [CI image delivery](development/ci-image-delivery.md#accumulated-main-coverage).
 
 `agent:verify` also avoids repeating included CSS checks. Full verification adds the browser smoke,
 which the root `check` script does not include. Focused local selection changes neither exact-SHA
